@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<coverage generated="1765461233977" clover="3.2.0">
+  <project timestamp="1765461233977" name="All files">
+    <metrics statements="7" coveredstatements="0" conditionals="0" coveredconditionals="0" methods="3" coveredmethods="0" elements="10" coveredelements="0" complexity="0" loc="7" ncloc="7" packages="2" files="3" classes="3"/>
+    <package name="pages">
+      <metrics statements="5" coveredstatements="0" conditionals="0" coveredconditionals="0" methods="2" coveredmethods="0"/>
+      <file name="_app.tsx" path="E:\Github Projects\Prompt Battles\prompt-battles\pages\_app.tsx">
+        <metrics statements="3" coveredstatements="0" conditionals="0" coveredconditionals="0" methods="1" coveredmethods="0"/>
+        <line num="3" count="0" type="stmt"/>
+        <line num="5" count="0" type="stmt"/>
+        <line num="6" count="0" type="stmt"/>
+      </file>
+      <file name="index.tsx" path="E:\Github Projects\Prompt Battles\prompt-battles\pages\index.tsx">
+        <metrics statements="2" coveredstatements="0" conditionals="0" coveredconditionals="0" methods="1" coveredmethods="0"/>
+        <line num="1" count="0" type="stmt"/>
+        <line num="2" count="0" type="stmt"/>
+      </file>
+    </package>
+    <package name="pages.api">
+      <metrics statements="2" coveredstatements="0" conditionals="0" coveredconditionals="0" methods="1" coveredmethods="0"/>
+      <file name="hello.ts" path="E:\Github Projects\Prompt Battles\prompt-battles\pages\api\hello.ts">
+        <metrics statements="2" coveredstatements="0" conditionals="0" coveredconditionals="0" methods="1" coveredmethods="0"/>
+        <line num="4" count="0" type="stmt"/>
+        <line num="5" count="0" type="stmt"/>
+      </file>
+    </package>
+  </project>
+</coverage>
