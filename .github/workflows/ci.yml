@@ -5,10 +5,22 @@ on:
     branches: [main]
 
 jobs:
+  security_audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run npm audit (fail on high or critical)
+        run: npm audit --audit-level=high
+
   checks:
     name: CI Checks
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
