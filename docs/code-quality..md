@@ -43,12 +43,8 @@ DELIVERABLE FORMAT:
 - For code PRs: include files changed, short explanation (2–3 lines), and tests added.
 - For new modules: include file-level comment, types, tests, and a short README inside the module folder.
 
-ROLE-SPECIFIC:
-...... Different role-specfic instructions have been given to different AI agents with generally the same principles in mind
 
 ENFORCEMENT:
 - - CI must run: `biome check`, `biome format --check` (optional), `typecheck`, `tests`. If any step fails, PR cannot be merged.
 
-- Add a link to docs/code-quality.md in each PR template.
-
-Please acknowledge and confirm you will apply these rules to all future code outputs. If anything in the charter conflicts with a technical constraint or higher-priority requirement, explain the conflict and your proposed resolution (2–3 sentences).
+If anything in the charter conflicts with a technical constraint or higher-priority requirement, explain the conflict and your proposed resolution (2–3 sentences).
