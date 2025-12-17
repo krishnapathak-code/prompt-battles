@@ -95,6 +95,23 @@ export default function RoomPage() {
 			supabase.removeChannel(phaseChannel);
 		};
 	}, [id]);
+	useEffect(() => {
+  if (!id || !userId) return;
+
+  const interval = setInterval(() => {
+    fetch("/api/room/heartbeat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        room_id: id,
+        user_id: userId,
+      }),
+    });
+  }, 2 * 60 * 1000); // every 2 minutes
+
+  return () => clearInterval(interval);
+}, [id, userId]);
+
 
 	useEffect(() => {
 		if (battlePhase === "waiting") return;
