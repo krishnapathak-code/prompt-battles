@@ -15,7 +15,7 @@ export default async function handler(
     return res.status(400).json({ error: "Missing title or user_id" });
   }
 
-  const roomCode = Math.floor(100000 + Math.random() * 900000).toString();// //pehla comand git add . then git c tha git commit
+  const roomCode = Math.floor(100000 + Math.random() * 900000).toString(); // co🤣 tu kar le pehle fir karta mai AHHAAHHAHHH kariye sir
   const now = new Date();
   const endsAt = new Date(now.getTime() + 30 * 60 * 1000).toISOString();
 
