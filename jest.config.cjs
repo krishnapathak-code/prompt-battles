@@ -15,8 +15,7 @@ module.exports = {
 		"!dist/**", // exclude build output if you ever create dist/
 	],
 
-
-  coverageDirectory: "coverage",
+	coverageDirectory: "coverage",
 	coverageThreshold: {
 		global: {
 			branches: 0,
