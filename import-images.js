@@ -6,10 +6,10 @@ import sharp from "sharp";
 
 // ========= CONFIG =========
 
-const PIXABAY_KEY = "15684367-90269c35865a8ffc3dd836db5";
-const SUPABASE_URL = "https://wzdtbfmhsjlchlmkltch.supabase.co";
+const PIXABAY_KEY = "input API key here";
+const SUPABASE_URL = "input API key here";
 const SUPABASE_KEY =
-	"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6ZHRiZm1oc2psY2hsbWtsdGNoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc2NTcyNDM5NywiZXhwIjoyMDgxMzAwMzk3fQ.JSOpMQ0hwllMw5UXc6hedt4odsZgynFV1_4j6ZTY-W8"; // server key for uploads
+	"input api key here"; // server key for uploads
 
 const BUCKET = "images";
 const FOLDER = "pixabay_ai_all";
