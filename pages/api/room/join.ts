@@ -15,23 +15,24 @@ export default async function handler(
     return res.status(400).json({ error: "Missing room_id or user_id" });
   }
 
-  // 1️⃣ Fetch room
+  // ✅ Validate 6‑char alphanumeric room code
+  const roomCodeRegex = /^[A-Z0-9]{6}$/;
+  if (!roomCodeRegex.test(room_id)) {
+    return res.status(400).json({ error: "Invalid room code format" });
+  }
+
+  // 1️⃣ Check if room exists
   const { data: room } = await supabaseAdmin
     .from("rooms")
-    .select("id, ends_at")
+    .select("id")
     .eq("id", room_id)
     .single();
 
   if (!room) {
-    return res.status(400).json({ error: "Room not found" });
+    return res.status(404).json({ error: "Room not found" });
   }
 
-  // 2️⃣ Check expiration
-  if (room.ends_at && new Date(room.ends_at) < new Date()) {
-    return res.status(410).json({ error: "Room has expired" });
-  }
-
-  // 3️⃣ Upsert player
+  // 2️⃣ Upsert player into room
   await supabaseAdmin.from("room_players").upsert({
     room_id,
     user_id,
@@ -39,5 +40,8 @@ export default async function handler(
     last_active_at: new Date().toISOString(),
   });
 
-  return res.status(200).json({ success: true, roomId: room_id });
+  return res.status(200).json({
+    success: true,
+    roomId: room_id,
+  });
 }
