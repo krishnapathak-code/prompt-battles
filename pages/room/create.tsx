@@ -29,7 +29,7 @@ export default function CreateRoom() {
 			body: JSON.stringify({ title, user_id: userId }),
 		});
 
-		const json = await res.json();
+		const json = await res.json(); //hello
 
 		if (json.roomId) router.push(`/room/${json.roomId}`);
 
