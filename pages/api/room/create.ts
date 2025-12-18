@@ -46,13 +46,16 @@ export default async function handler(
     if (!error && data) {
       roomId = data.id;
 
-      // Insert host into room_players
-      await supabaseAdmin.from("room_players").insert({
-        room_id: roomCode,
-        user_id,
-        is_host: true,
-        last_active_at: now,
-      });
+// 2️⃣ Insert host into room_players.
+const { error: hostErr } = await supabaseAdmin
+ .from("room_players")
+ .insert({
+room_id: roomCode,
+user_id,
+is_host: true,
+is_ready: true,
+last_active_at: now,
+ });
 
       break;
     }
