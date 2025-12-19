@@ -1,3 +1,4 @@
+'use server';
 import type { NextApiRequest, NextApiResponse } from "next";
 import { supabaseAdmin } from "@/lib/supabaseAdmin";
 
@@ -15,7 +16,7 @@ export default async function handler(
     return res.status(400).json({ error: "Missing room_id or user_id" });
   }
 
-  // ✅ Validate 6‑char alphanumeric room code
+  // Validate 6‑char alphanumeric room code
   const roomCodeRegex = /^[A-Z0-9]{6}$/;
   if (!roomCodeRegex.test(room_id)) {
     return res.status(400).json({ error: "Invalid room code format" });
@@ -32,17 +33,23 @@ export default async function handler(
     return res.status(404).json({ error: "Room not found" });
   }
 
-  // 2️⃣ Upsert player into room
-  await supabaseAdmin.from("room_players").upsert({
-    room_id,
-    user_id,
-    is_host: false,
-    last_active_at: new Date().toISOString(),
-  });
+  // 2️⃣ Insert player (important: INSERT — not UPSERT)
+  const { error: insertErr } = await supabaseAdmin
+    .from("room_players")
+    .insert({
+      room_id,
+      user_id,
+      is_host: false,
+      is_ready: false,
+      last_active_at: new Date().toISOString(),
+    });
+
+  if (insertErr) {
+    return res.status(400).json({ error: insertErr.message });
+  }
 
   return res.status(200).json({
     success: true,
     roomId: room_id,
   });
 }
-

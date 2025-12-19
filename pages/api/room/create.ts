@@ -51,6 +51,7 @@ export default async function handler(
         room_id: roomCode,
         user_id,
         is_host: true,
+        is_ready: true,
         last_active_at: now,
       });
 
