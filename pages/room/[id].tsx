@@ -80,6 +80,22 @@ export default function RoomPage() {
   }, [roomId, userId]);
 
   /* ---------------- PLAYERS + REALTIME ---------------- */
+const loadPlayers = async () => {
+  if (!roomId) return;
+
+  const { data, error } = await supabase
+    .from("room_players")
+    .select("*")
+    .eq("room_id", roomId);
+
+  if (error) {
+    console.error("❌ loadPlayers error:", error);
+    return;
+  }
+
+  console.log("🔄 Reloaded players:", data);
+  setPlayers(data || []);
+};
 
   useEffect(() => {
     if (!roomId) return;
@@ -94,28 +110,29 @@ export default function RoomPage() {
 
     loadPlayers();
 
-    const playersChannel = supabase
-      .channel(⁠ room-${roomId} ⁠)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "room_players",
-          filter: ⁠ room_id=eq.${roomId} ⁠,
-        },
-        (payload) => {
-          const updated = payload.new as Player;
-          setPlayers((prev) => [
-            ...prev.filter((p) => p.user_id !== updated.user_id),
-            updated,
-          ]);
-        }
-      )
-      .subscribe();
+ const playersChannel = supabase
+  .channel(`room-${roomId}`)
+  .on(
+    "postgres_changes",
+    {
+      event: "*",
+      schema: "public",
+      table: "room_players",
+      filter: `room_id=eq.${roomId}`,
+    },
+    async (payload) => {
+      console.log("📡 room_players change:", payload);
+
+      // re-fetch players to keep UI in sync
+      await loadPlayers();
+    }
+  )
+  .subscribe();
+
 
     const phaseChannel = supabase
-      .channel(⁠ room-phase-${roomId} ⁠)
+      .channel(`room-phase-${roomId}`)
+
       .on("broadcast", { event: "phase_update" }, (payload) => {
         setBattlePhase(payload.payload.phase);
         setTimeLeft(payload.payload.time);
@@ -224,48 +241,58 @@ export default function RoomPage() {
           />
         )}
 
-        {/* WAITING */}
-        {battlePhase === "waiting" && (
-          <div className="flex flex-col items-center gap-3">
-            {!isHost && (
-              <Button
-                disabled={isReady}
-                onClick={() =>
-                  fetch("/api/room/ready", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                  })
-                }
-              >
-                {isReady ? "Ready ✔" : "Mark Ready"}
-              </Button>
-            )}
+{/* WAITING PHASE ACTIONS */}
+{battlePhase === "waiting" && (
+  <div className="flex flex-col items-center gap-3">
 
-            {isHost && (
-              <>
-                <Button
-                  disabled={!allPlayersReady}
-                  onClick={() =>
-                    fetch("/api/room/start", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                    })
-                  }
-                >
-                  Start Battle
-                </Button>
+    {/* NON-HOST: READY */}
+    {!isHost && (
+      <Button
+        disabled={isReady}
+        onClick={async () => {
+          if (!roomId || !userId) return;
 
-                {!allPlayersReady && (
-                  <p className="text-sm text-gray-500">
-                    Waiting for all players to be ready…
-                  </p>
-                )}
-              </>
-            )}
-          </div>
+          await fetch("/api/room/ready", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ room_id: roomId, user_id: userId }),
+          });
+
+          console.log("✅ Ready clicked — reloading players");
+          await loadPlayers();
+        }}
+      >
+        {isReady ? "Ready ✔" : "Mark Ready"}
+      </Button>
+    )}
+
+    {/* HOST: START */}
+    {isHost && (
+      <>
+        <Button
+          onClick={async () => {
+            if (!roomId || !userId) return;
+
+            await fetch("/api/room/start", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ room_id: roomId, user_id: userId }),
+            });
+          }}
+        >
+          Start Battle
+        </Button>
+
+        {!allPlayersReady && (
+          <p className="text-sm text-gray-500">
+            Waiting for all players to be ready…
+          </p>
         )}
+      </>
+    )}
+  </div>
+)}
+
 
         {/* SUBMISSION */}
         {battlePhase === "submission" && (
@@ -327,6 +354,7 @@ export default function RoomPage() {
           </div>
         )}
       </div>
+
     </div>
   );
 }
