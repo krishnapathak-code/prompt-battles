@@ -11,7 +11,9 @@ type Player = {
   user_id: string;
   is_host?: boolean;
   is_ready?: boolean;
-  name?: string;
+  users?: {
+    name: string;
+  } | null;
 };
 
 type PromptResult = {
@@ -20,6 +22,9 @@ type PromptResult = {
   scores?: number;
   justification?: string;
   user_id: string;
+  users?: {
+    name: string;
+  } | null;
 };
 
 /* ---------------- COMPONENT ---------------- */
@@ -79,56 +84,53 @@ export default function RoomPage() {
     ensurePlayer();
   }, [roomId, userId]);
 
-  /* ---------------- PLAYERS + REALTIME ---------------- */
-const loadPlayers = async () => {
-  if (!roomId) return;
+  /* ---------------- LOAD PLAYERS ---------------- */
 
-  const { data, error } = await supabase
-    .from("room_players")
-    .select("*")
-    .eq("room_id", roomId);
+  const loadPlayers = async () => {
+    if (!roomId) return;
 
-  if (error) {
-    console.error("❌ loadPlayers error:", error);
-    return;
-  }
+    const { data, error } = await supabase
+      .from("room_players")
+      .select(`
+        user_id,
+        is_host,
+        is_ready,
+        users (
+          name
+        )
+      `)
+      .eq("room_id", roomId);
 
-  console.log("🔄 Reloaded players:", data);
-  setPlayers(data || []);
-};
+    if (error) {
+      console.error("❌ loadPlayers error:", error);
+      return;
+    }
+
+    setPlayers((data as Player[]) || []);
+  };
+
+  /* ---------------- REALTIME ---------------- */
 
   useEffect(() => {
     if (!roomId) return;
 
-    const loadPlayers = async () => {
-      const { data } = await supabase
-        .from("room_players")
-        .select("*")
-        .eq("room_id", roomId);
-      setPlayers(data || []);
-    };
-
     loadPlayers();
 
- const playersChannel = supabase
-  .channel(`room-${roomId}`)
-  .on(
-    "postgres_changes",
-    {
-      event: "*",
-      schema: "public",
-      table: "room_players",
-      filter: `room_id=eq.${roomId}`,
-    },
-    async (payload) => {
-      console.log("📡 room_players change:", payload);
-
-      // re-fetch players to keep UI in sync
-      await loadPlayers();
-    }
-  )
-  .subscribe();
-
+    const playersChannel = supabase
+      .channel(`room-${roomId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "room_players",
+          filter: `room_id=eq.${roomId}`,
+        },
+        async () => {
+          await loadPlayers();
+        }
+      )
+      .subscribe();
 
     const phaseChannel = supabase
       .channel(`room-phase-${roomId}`)
@@ -146,7 +148,16 @@ const loadPlayers = async () => {
 
         const { data } = await supabase
           .from("prompts")
-          .select("id, prompt_text, scores, justification, user_id")
+          .select(`
+            id,
+            prompt_text,
+            scores,
+            justification,
+            user_id,
+            users (
+              name
+            )
+          `)
           .eq("round_id", payload.payload.round_id)
           .order("scores", { ascending: false });
 
@@ -169,7 +180,7 @@ const loadPlayers = async () => {
 
   const nonHostPlayers = players.filter((p) => !p.is_host);
   const allPlayersReady =
-    nonHostPlayers.length > 0 &&
+    nonHostPlayers.length === 0 ||
     nonHostPlayers.every((p) => p.is_ready === true);
 
   const myResult = results.find((r) => r.user_id === userId);
@@ -214,14 +225,17 @@ const loadPlayers = async () => {
       {/* PLAYERS */}
       <div className="w-64 border rounded-lg p-4 h-fit">
         <h2 className="font-semibold mb-3 text-lg">Players</h2>
+
         {players.map((p) => (
           <div
             key={p.user_id}
             className="flex items-center gap-2 mb-2 border p-2 rounded"
           >
             <div className="w-8 h-8 rounded-full bg-gray-300" />
+
             <span>
-              {p.name || "Player"} {p.is_host && "(host)"} {p.is_ready && "✔"}
+              {p.users?.name || "Player"} {p.is_host && "(host)"}{" "}
+              {p.is_ready && "✔"}
             </span>
           </div>
         ))}
@@ -241,58 +255,58 @@ const loadPlayers = async () => {
           />
         )}
 
-{/* WAITING PHASE ACTIONS */}
-{battlePhase === "waiting" && (
-  <div className="flex flex-col items-center gap-3">
+        {/* WAITING */}
+        {battlePhase === "waiting" && (
+          <div className="flex flex-col items-center gap-3">
+            {!isHost && (
+              <Button
+                onClick={async () => {
+                  if (!roomId || !userId) return;
 
-    {/* NON-HOST: READY */}
-    {!isHost && (
-      <Button
-        disabled={isReady}
-        onClick={async () => {
-          if (!roomId || !userId) return;
+                  await fetch("/api/room/ready", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                      room_id: roomId,
+                      user_id: userId,
+                      is_ready: !isReady,
+                    }),
+                  });
+                }}
+              >
+                {isReady ? "Unready" : "Mark Ready"}
+              </Button>
+            )}
 
-          await fetch("/api/room/ready", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ room_id: roomId, user_id: userId }),
-          });
+            {isHost && (
+              <>
+                <Button
+                  disabled={!allPlayersReady}
+                  onClick={async () => {
+                    if (!roomId || !userId) return;
 
-          console.log("✅ Ready clicked — reloading players");
-          await loadPlayers();
-        }}
-      >
-        {isReady ? "Ready ✔" : "Mark Ready"}
-      </Button>
-    )}
+                    await fetch("/api/battle/start", {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        room_id: roomId,
+                        user_id: userId,
+                      }),
+                    });
+                  }}
+                >
+                  Start Battle
+                </Button>
 
-    {/* HOST: START */}
-    {isHost && (
-      <>
-        <Button
-          onClick={async () => {
-            if (!roomId || !userId) return;
-
-            await fetch("/api/room/start", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ room_id: roomId, user_id: userId }),
-            });
-          }}
-        >
-          Start Battle
-        </Button>
-
-        {!allPlayersReady && (
-          <p className="text-sm text-gray-500">
-            Waiting for all players to be ready…
-          </p>
+                {!allPlayersReady && (
+                  <p className="text-sm text-gray-500">
+                    Waiting for all players to be ready…
+                  </p>
+                )}
+              </>
+            )}
+          </div>
         )}
-      </>
-    )}
-  </div>
-)}
-
 
         {/* SUBMISSION */}
         {battlePhase === "submission" && (
@@ -328,14 +342,18 @@ const loadPlayers = async () => {
         {/* RESULTS */}
         {battlePhase === "results" && !loadingEval && (
           <div className="w-full max-w-xl">
-            <h2 className="text-2xl font-bold mb-4 text-center">Leaderboard</h2>
+            <h2 className="text-2xl font-bold mb-4 text-center">
+              Leaderboard
+            </h2>
 
             {results.map((r, i) => (
               <div
                 key={r.id}
                 className="p-3 border rounded mb-3 flex justify-between"
               >
-                <span>{i + 1}. Player</span>
+                <span>
+                  {i + 1}. {r.users?.name || "Player"}
+                </span>
                 <span className="font-bold">{r.scores}</span>
               </div>
             ))}
