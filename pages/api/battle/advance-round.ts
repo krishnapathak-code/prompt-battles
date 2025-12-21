@@ -9,77 +9,88 @@ export default async function handler(
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  const { room_id, user_id } = req.body;
-  if (!room_id || !user_id) {
-    return res.status(400).json({ error: "Missing params" });
+  const { room_id } = req.body; // user_id not strictly needed if we remove host check
+
+  if (!room_id) {
+    return res.status(400).json({ error: "Missing room_id" });
   }
 
-  // Host check
-  const { data: host } = await supabaseAdmin
-    .from("room_players")
-    .select("is_host")
-    .eq("room_id", room_id)
-    .eq("user_id", user_id)
-    .single();
+  try {
+    /* ---------------- 1. READ ROOM STATE ---------------- */
+    const { data: room } = await supabaseAdmin
+      .from("rooms")
+      .select("current_round, total_rounds")
+      .eq("id", room_id)
+      .single();
 
-  if (!host?.is_host) {
-    return res.status(403).json({ error: "Only host allowed" });
-  }
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
+    }
 
-  // Read room
-  const { data: room } = await supabaseAdmin
-    .from("rooms")
-    .select("current_round, total_rounds")
-    .eq("id", room_id)
-    .single();
+    // 🔥 SAFETY CHECK:
+    // Check if a round for 'current_round + 1' ALREADY exists.
+    // This prevents 4 players from creating 4 identical rounds.
+    const nextRoundNum = room.current_round + 1;
+    
+    const { data: existingRound } = await supabaseAdmin
+      .from("rounds")
+      .select("id")
+      .eq("room_id", room_id)
+      .eq("round_number", nextRoundNum)
+      .single();
 
-  if (!room) {
-    return res.status(404).json({ error: "Room not found" });
-  }
+    if (existingRound) {
+      console.log("Round already created by another player, skipping...");
+      return res.status(200).json({ message: "Round already advanced" });
+    }
 
-  const nextRound = room.current_round + 1;
-
-  // Game finished
-  if (nextRound > room.total_rounds) {
-    await supabaseAdmin
-      .channel(`room-phase-${room_id}`)
-      .send({
+    /* ---------------- 2. CHECK GAME FINISHED ---------------- */
+    if (nextRoundNum > room.total_rounds) {
+      await supabaseAdmin.channel(`room-phase-${room_id}`).send({
         type: "broadcast",
         event: "game_finished",
         payload: {},
       });
+      return res.status(200).json({ finished: true });
+    }
 
-    return res.status(200).json({ finished: true });
-  }
+    /* ---------------- 3. GET IMAGE ---------------- */
+    const { data: images } = await supabaseAdmin
+      .from("images")
+      .select("id, url");
 
-  // Update room
-  await supabaseAdmin
-    .from("rooms")
-    .update({ current_round: nextRound })
-    .eq("id", room_id);
+    if (!images || images.length === 0) {
+      return res.status(500).json({ error: "No images available" });
+    }
 
-  // Pick image
-  const { data: images } = await supabaseAdmin
-    .from("images")
-    .select("id, url");
+    const image = images[Math.floor(Math.random() * images.length)];
 
-  const image = images![Math.floor(Math.random() * images!.length)];
+    /* ---------------- 4. UPDATE ROOM ---------------- */
+    // We increment the room counter here
+    await supabaseAdmin
+      .from("rooms")
+      .update({ current_round: nextRoundNum })
+      .eq("id", room_id);
 
-  // Create round
-  const { data: round } = await supabaseAdmin
-    .from("rounds")
-    .insert({
-      room_id,
-      round_number: nextRound,
-      image_id: image.id,
-    })
-    .select()
-    .single();
+    /* ---------------- 5. CREATE ROUND ---------------- */
+    const { data: round, error: roundError } = await supabaseAdmin
+      .from("rounds")
+      .insert({
+        room_id,
+        round_number: nextRoundNum,
+        image_id: image.id,
+      })
+      .select()
+      .single();
 
-  // 🔥 SINGLE SOURCE OF TRUTH
-  await supabaseAdmin
-    .channel(`room-phase-${room_id}`)
-    .send({
+    if (roundError) {
+      // If error is unique constraint violation, it means another player beat us to it.
+      // That is fine, we just ignore it.
+      return res.status(200).json({ message: "Race condition handled" });
+    }
+
+    /* ---------------- 6. BROADCAST ---------------- */
+    await supabaseAdmin.channel(`room-phase-${room_id}`).send({
       type: "broadcast",
       event: "phase_update",
       payload: {
@@ -87,9 +98,14 @@ export default async function handler(
         time: 60,
         image_url: image.url,
         round_id: round.id,
-        round_number: nextRound,
+        round_number: nextRoundNum,
       },
     });
 
-  return res.status(200).json({ success: true });
+    return res.status(200).json({ success: true, round: nextRoundNum });
+
+  } catch (err: any) {
+    console.error("ADVANCE_ROUND: Critical Error", err);
+    return res.status(500).json({ error: err.message });
+  }
 }
