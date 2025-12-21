@@ -23,9 +23,9 @@ export default async function handler(
     .eq("user_id", user_id)
     .single();
 
-  if (!hostRow?.is_host) {
+ /* if (!hostRow?.is_host) {
     return res.status(403).json({ error: "Only host can start the round" });
-  }
+  }*/
 
   /* ---------------- ROOM STATE ---------------- */
   const { data: room } = await supabaseAdmin
