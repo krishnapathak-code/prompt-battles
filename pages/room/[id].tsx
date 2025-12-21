@@ -18,6 +18,7 @@ type Player = {
   } | null;
 };
 
+
 type PromptResult = {
   id: string;
   prompt_text: string;
@@ -234,10 +235,18 @@ export default function RoomPage() {
         }
         return prev - 1;
       });
-    }, 1000);
+    }
 
-    return () => clearInterval(interval);
-  }, [battlePhase, roomId, currentRoundId, imageURL]);
+    return;
+  }
+
+  const t = setTimeout(() => {
+    setNextRoundTimer((v) => (v ? v - 1 : null));
+  }, 1000);
+
+  return () => clearTimeout(t);
+}, [nextRoundTimer, isHost]);
+
 
   /* ---------------- NEXT ROUND TIMER ---------------- */
   useEffect(() => {
@@ -569,6 +578,108 @@ export default function RoomPage() {
           )}
         </main>
       </div>
+    ))}
+
+    {myResult && (
+      <>
+        <h3 className="text-2xl font-semibold mt-8 mb-3">
+          AI Evaluation
+        </h3>
+        <div className="bg-[#0F172A] p-6 rounded-2xl shadow-inner">
+          <p className="font-semibold text-lg">
+            Score: {myResult.scores}
+          </p>
+          <p className="text-gray-300 mt-1">
+            {myResult.justification}
+          </p>
+        </div>
+      </>
+    )}
+
+    {/* 👇 TIMER GOES BELOW RESULTS */}
+    {nextRoundTimer !== null && (
+      <div className="mt-10 text-center">
+        <p className="text-lg text-gray-400">
+          Next round starts in
+        </p>
+        <p className="text-5xl font-bold text-indigo-400 mt-2">
+          {nextRoundTimer}s
+        </p>
+      </div>
+    )}
+  </div>
+)}
+
+          {battlePhase === "finished" && (
+  <div className="w-full max-w-xl">
+    <h2 className="text-4xl font-bold mb-8 text-center tracking-tight">
+      Final Leaderboard 🏆
+    </h2>
+
+    {[...players]
+      .sort(
+        (a, b) =>
+          (b.player_scores?.total_score ?? 0) -
+          (a.player_scores?.total_score ?? 0)
+      )
+      .map((p, i) => (
+        <div
+          key={p.user_id}
+          className={`flex justify-between items-center px-8 py-5 rounded-2xl mb-4 ${
+            i === 0
+              ? "bg-gradient-to-r from-indigo-600 to-purple-600"
+              : "bg-[#0F172A]"
+          }`}
+        >
+          <span className="text-lg font-semibold">
+            {i + 1}. {p.users?.name}
+            {i === 0 && " 🥇"}
+          </span>
+          <span className="text-xl font-bold">
+            {p.player_scores?.total_score ?? 0}
+          </span>
+        </div>
+      ))}
+  </div>
+)}
+        </main>
+      </div>
+      {loadingEval && (
+  <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
+    <div className="bg-[#0F172A] border border-gray-700 rounded-3xl px-12 py-10 shadow-2xl flex flex-col items-center gap-6 animate-fade-in">
+      
+      {/* Spinner */}
+      <div className="w-14 h-14 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
+
+      {/* Text */}
+      <div className="text-center">
+        <p className="text-2xl font-semibold tracking-tight">
+          Evaluating
+        </p>
+        <p className="text-sm text-gray-400 mt-1">
+          AI is scoring prompts…
+        </p>
+      </div>
+    </div>
+  </div>
+)}{roundNumber && (
+  <div
+    className={`
+      fixed left-1/2 z-[200]
+      transition-all duration-1000 ease-in-out
+      ${showRoundIntro
+        ? "top-1/2 -translate-x-1/2 -translate-y-1/2 scale-125 opacity-100"
+        : "top-6 -translate-x-1/2 scale-90 opacity-80"}
+    `}
+  >
+    <div className="px-10 py-5 rounded-3xl bg-gradient-to-r from-indigo-600 to-purple-600 shadow-2xl">
+      <span className="text-4xl font-extrabold tracking-wide">
+        ROUND {roundNumber}
+      </span>
+    </div>
+  </div>
+)}
+
 
       {/* EVALUATING OVERLAY */}
       {loadingEval && (
