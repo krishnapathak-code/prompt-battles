@@ -291,6 +291,38 @@ useEffect(() => {
     return () => clearTimeout(t);
   }, [nextRoundTimer, roomId, userId]);
 
+  /* ---------------- NEXT ROUND TIMER (RESULTS PHASE) ---------------- */
+  useEffect(() => {
+    if (nextRoundTimer === null) return;
+
+    if (nextRoundTimer === 0) {
+      setNextRoundTimer(null);
+      setIsTransitioning(true);
+
+      // Reset local UI
+      setResults([]);
+      setPromptText("");
+      setSubmitted(false);
+      setTimeLeft(0);
+      setImageURL(null);
+      setRoundNumber(null);
+
+      fetch("/api/battle/advance-round", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room_id: roomId, user_id: userId }),
+      }).catch(() => setIsTransitioning(false));
+
+      return;
+    }
+
+    const t = setTimeout(() => {
+      setNextRoundTimer((v) => (v && v > 0 ? v - 1 : 0));
+    }, 1000);
+
+    return () => clearTimeout(t);
+  }, [nextRoundTimer, roomId, userId]);
+
   /* ---------------- UI ---------------- */
 
   return (
