@@ -219,6 +219,7 @@ export default function RoomPage() {
         setBattlePhase("submission");
         setTimeLeft(payload.payload.time);
         setImageURL(payload.payload.image_url);
+
         setCurrentRoundId(payload.payload.round_id);
         setActiveRoundId(payload.payload.round_id);
         setResults([]);
@@ -229,6 +230,8 @@ export default function RoomPage() {
         setRoundNumber(payload.payload.round_number);
         setLoadingEval(false);
       })
+
+      /* ---- RESULTS READY ---- */
       .on("broadcast", { event: "results_ready" }, async (payload) => {
         setLoadingEval(false);
         if (activeRoundId && payload.payload.round_id !== activeRoundId) return;
