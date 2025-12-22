@@ -18,7 +18,6 @@ type Player = {
   } | null;
 };
 
-
 type PromptResult = {
   id: string;
   prompt_text: string;
@@ -56,8 +55,8 @@ export default function RoomPage() {
   const [loadingEval, setLoadingEval] = useState(false);
   const [showRoundIntro, setShowRoundIntro] = useState(false);
   const [roundNumber, setRoundNumber] = useState<number | null>(null);
-  const [totalRounds, setTotalRounds] = useState<number>(3); // Default 3, fetches real count later
-  const [isTransitioning, setIsTransitioning] = useState(false); // Fixes "Starting Round..." sticking
+  const [totalRounds, setTotalRounds] = useState<number>(3);
+  const [isTransitioning, setIsTransitioning] = useState(false);
 
   // Timer State
   const [timerRoundId, setTimerRoundId] = useState<string | null>(null);
@@ -75,7 +74,6 @@ export default function RoomPage() {
   /* ---------------- FETCH ROOM INFO ---------------- */
   useEffect(() => {
     if (!roomId) return;
-    // Get total rounds so we know when to end the game
     supabase
       .from("rooms")
       .select("total_rounds")
@@ -130,7 +128,7 @@ export default function RoomPage() {
       .channel(`room-phase-${roomId}`)
       /* ---- PHASE UPDATE (NEW ROUND) ---- */
       .on("broadcast", { event: "phase_update" }, (payload) => {
-        setIsTransitioning(false); // Stop loader
+        setIsTransitioning(false);
         setBattlePhase("submission");
         setTimeLeft(payload.payload.time);
         setImageURL(payload.payload.image_url);
@@ -188,7 +186,7 @@ export default function RoomPage() {
 
       /* ---- GAME FINISHED ---- */
       .on("broadcast", { event: "game_finished" }, async () => {
-        setIsTransitioning(false); // Stop any loaders
+        setIsTransitioning(false);
         await loadPlayers();
         setBattlePhase("finished");
         setNextRoundTimer(null);
@@ -200,7 +198,7 @@ export default function RoomPage() {
       supabase.removeChannel(playersChannel);
       supabase.removeChannel(phaseChannel);
     };
-  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds]);
+  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds, roundNumber]); // Added roundNumber dependency
 
   /* ---------------- DERIVED STATE ---------------- */
   const me = players.find((p) => p.user_id === userId);
@@ -208,20 +206,23 @@ export default function RoomPage() {
   const isReady = me?.is_ready === true;
   const nonHostPlayers = players.filter((p) => !p.is_host);
   const allPlayersReady =
-    nonHostPlayers.length === 0 ||
     nonHostPlayers.every((p) => p.is_ready === true);
   const myResult = results.find((r) => r.user_id === userId);
 
-  /* ---------------- GAME TIMER ---------------- */
+  /* ---------------- GAME TIMER (SUBMISSION PHASE) ---------------- */
   useEffect(() => {
     if (battlePhase !== "submission") return;
-    setTimeLeft(60);
+    
+    // NOTE: In a real app, you might sync this with server time rather than reset to 60
+    setTimeLeft(60); 
 
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
           setLoadingEval(true);
+          
+          // Only trigger score calc if we haven't already (or let backend handle deduplication)
           fetch("/api/battle/score-prompts", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -231,30 +232,23 @@ export default function RoomPage() {
               image_url: imageURL,
             }),
           }).catch(() => setLoadingEval(false));
+          
           return 0;
         }
         return prev - 1;
       });
-    }
+    }, 1000);
 
-    return;
-  }
+    return () => clearInterval(interval);
+  }, [battlePhase, roomId, currentRoundId, imageURL]);
 
-  const t = setTimeout(() => {
-    setNextRoundTimer((v) => (v ? v - 1 : null));
-  }, 1000);
-
-  return () => clearTimeout(t);
-}, [nextRoundTimer, isHost]);
-
-
-  /* ---------------- NEXT ROUND TIMER ---------------- */
+  /* ---------------- NEXT ROUND TIMER (RESULTS PHASE) ---------------- */
   useEffect(() => {
     if (nextRoundTimer === null) return;
 
     if (nextRoundTimer === 0) {
       setNextRoundTimer(null);
-      setIsTransitioning(true); // START LOADING
+      setIsTransitioning(true);
 
       // Reset local UI
       setResults([]);
@@ -264,7 +258,6 @@ export default function RoomPage() {
       setImageURL(null);
       setRoundNumber(null);
 
-      // Anyone can trigger advance now (handled safely by backend)
       fetch("/api/battle/advance-round", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -275,7 +268,7 @@ export default function RoomPage() {
     }
 
     const t = setTimeout(() => {
-      setNextRoundTimer((v) => (v ? v - 1 : null));
+      setNextRoundTimer((v) => (v && v > 0 ? v - 1 : 0));
     }, 1000);
 
     return () => clearTimeout(t);
@@ -578,108 +571,6 @@ export default function RoomPage() {
           )}
         </main>
       </div>
-    ))}
-
-    {myResult && (
-      <>
-        <h3 className="text-2xl font-semibold mt-8 mb-3">
-          AI Evaluation
-        </h3>
-        <div className="bg-[#0F172A] p-6 rounded-2xl shadow-inner">
-          <p className="font-semibold text-lg">
-            Score: {myResult.scores}
-          </p>
-          <p className="text-gray-300 mt-1">
-            {myResult.justification}
-          </p>
-        </div>
-      </>
-    )}
-
-    {/* 👇 TIMER GOES BELOW RESULTS */}
-    {nextRoundTimer !== null && (
-      <div className="mt-10 text-center">
-        <p className="text-lg text-gray-400">
-          Next round starts in
-        </p>
-        <p className="text-5xl font-bold text-indigo-400 mt-2">
-          {nextRoundTimer}s
-        </p>
-      </div>
-    )}
-  </div>
-)}
-
-          {battlePhase === "finished" && (
-  <div className="w-full max-w-xl">
-    <h2 className="text-4xl font-bold mb-8 text-center tracking-tight">
-      Final Leaderboard 🏆
-    </h2>
-
-    {[...players]
-      .sort(
-        (a, b) =>
-          (b.player_scores?.total_score ?? 0) -
-          (a.player_scores?.total_score ?? 0)
-      )
-      .map((p, i) => (
-        <div
-          key={p.user_id}
-          className={`flex justify-between items-center px-8 py-5 rounded-2xl mb-4 ${
-            i === 0
-              ? "bg-gradient-to-r from-indigo-600 to-purple-600"
-              : "bg-[#0F172A]"
-          }`}
-        >
-          <span className="text-lg font-semibold">
-            {i + 1}. {p.users?.name}
-            {i === 0 && " 🥇"}
-          </span>
-          <span className="text-xl font-bold">
-            {p.player_scores?.total_score ?? 0}
-          </span>
-        </div>
-      ))}
-  </div>
-)}
-        </main>
-      </div>
-      {loadingEval && (
-  <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-    <div className="bg-[#0F172A] border border-gray-700 rounded-3xl px-12 py-10 shadow-2xl flex flex-col items-center gap-6 animate-fade-in">
-      
-      {/* Spinner */}
-      <div className="w-14 h-14 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
-
-      {/* Text */}
-      <div className="text-center">
-        <p className="text-2xl font-semibold tracking-tight">
-          Evaluating
-        </p>
-        <p className="text-sm text-gray-400 mt-1">
-          AI is scoring prompts…
-        </p>
-      </div>
-    </div>
-  </div>
-)}{roundNumber && (
-  <div
-    className={`
-      fixed left-1/2 z-[200]
-      transition-all duration-1000 ease-in-out
-      ${showRoundIntro
-        ? "top-1/2 -translate-x-1/2 -translate-y-1/2 scale-125 opacity-100"
-        : "top-6 -translate-x-1/2 scale-90 opacity-80"}
-    `}
-  >
-    <div className="px-10 py-5 rounded-3xl bg-gradient-to-r from-indigo-600 to-purple-600 shadow-2xl">
-      <span className="text-4xl font-extrabold tracking-wide">
-        ROUND {roundNumber}
-      </span>
-    </div>
-  </div>
-)}
-
 
       {/* EVALUATING OVERLAY */}
       {loadingEval && (
@@ -696,7 +587,17 @@ export default function RoomPage() {
 
       {/* ROUND INTRO POPUP */}
       {showRoundIntro && roundNumber && (
-        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[200] scale-125 opacity-100 transition-all duration-1000 ease-in-out">
+        <div
+          className={`
+            fixed left-1/2 z-[200]
+            transition-all duration-1000 ease-in-out
+            ${
+              showRoundIntro
+                ? "top-1/2 -translate-x-1/2 -translate-y-1/2 scale-125 opacity-100"
+                : "top-6 -translate-x-1/2 scale-90 opacity-80"
+            }
+          `}
+        >
           <div className="px-10 py-5 rounded-3xl bg-gradient-to-r from-indigo-600 to-purple-600 shadow-2xl">
             <span className="text-4xl font-extrabold tracking-wide">
               ROUND {roundNumber}
