@@ -24,8 +24,7 @@ export default async function handler(
 
   console.log("🔥 SCORE PROMPTS HIT", { room_id, round_id });
 
-  /* ---------------- FETCH PROMPTS ---------------- */
-
+  /* ---------------- 1. FETCH ALL PROMPTS ---------------- */
   const { data: prompts, error: promptErr } = await supabaseAdmin
     .from("prompts")
     .select("id, prompt_text, user_id")
@@ -36,19 +35,25 @@ export default async function handler(
   }
 
   if (!prompts || prompts.length === 0) {
-    return res.status(400).json({ error: "No prompts found" });
+    return res.status(200).json({ message: "No prompts to score." });
   }
+  
+  const validPrompts = prompts.filter(p => p.prompt_text && p.prompt_text.trim().length > 0);
+  const emptyPrompts = prompts.filter(p => !p.prompt_text || p.prompt_text.trim().length === 0);
 
-  const promptList = prompts
-    .map(
-      (p, i) =>
-        `Prompt ${i + 1}:\nID: ${p.id}\nUser: ${p.user_id}\nText: "${p.prompt_text}"`,
-    )
-    .join("\n\n");
+  let aiEvaluations: any[] = [];
 
-  /* ---------------- GEMINI PROMPT ---------------- */
+  /* ---------------- 3. CALL GEMINI (Only for Valid Prompts) ---------------- */
+  
+  if (validPrompts.length > 0) {
+    const promptList = validPrompts
+      .map(
+        (p, i) =>
+          `Prompt ${i + 1}:\nID: ${p.id}\nUser: ${p.user_id}\nText: "${p.prompt_text}"`,
+      )
+      .join("\n\n");
 
-  const instructions = `
+    const instructions = `
 Task: Given an image and multiple prompts, score each prompt 0–100 based on how well it matches the image.
 
 Rules:
@@ -67,57 +72,48 @@ Return ONLY valid JSON:
 ]
 `;
 
-  const contents = [
-    {
-      role: "user",
-      parts: [
-        { text: instructions },
-        { fileData: { mimeType: "image/jpeg", fileUri: image_url } },
-        { text: "Prompts:\n" + promptList },
-      ],
-    },
-  ];
+    const contents = [
+      {
+        role: "user",
+        parts: [
+          { text: instructions },
+          { fileData: { mimeType: "image/jpeg", fileUri: image_url } },
+          { text: "Prompts:\n" + promptList },
+        ],
+      },
+    ];
 
-  /* ---------------- CALL GEMINI ---------------- */
+    try {
+      const geminiResult = await ai.models.generateContent({
+        model: "gemini-2.5-flash-lite", 
+        contents,
+      });
 
-  let geminiResult;
+      let text = geminiResult.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+      aiEvaluations = JSON.parse(text);
 
-  try {
-    geminiResult = await ai.models.generateContent({
-      model: "gemini-2.5-flash-lite",
-      contents,
-    });
-  } catch (err: any) {
-    return res.status(500).json({
-      error: "Gemini API call failed: " + err.message,
-    });
+    } catch (err: any) {
+      console.error("Gemini API Error:", err);
+      return res.status(500).json({ error: "Gemini calculation failed" });
+    }
   }
 
-  let text =
-    geminiResult.candidates?.[0]?.content?.parts?.[0]?.text || "";
+  /* ---------------- 4. MERGE RESULTS ---------------- */
 
-  text = text.replace(/```json/g, "").replace(/```/g, "").trim();
+  const emptyEvaluations = emptyPrompts.map(p => ({
+    user_id: p.user_id,
+    prompt_id: p.id,
+    score: 0,
+    reason: "No prompt submitted in time."
+  }));
 
-  let evaluations: {
-    user_id: string;
-    prompt_id: string;
-    score: number;
-    reason: string;
-  }[];
+  const allEvaluations = [...aiEvaluations, ...emptyEvaluations];
 
-  try {
-    evaluations = JSON.parse(text);
-  } catch {
-    return res.status(500).json({
-      error: "Gemini did not return valid JSON",
-      raw: text,
-    });
-  }
+  /* ---------------- 5. SAVE RESULTS ---------------- */
 
-  /* ---------------- SAVE RESULTS ---------------- */
-
-  for (const ev of evaluations) {
-    // 1️⃣ Save per-round prompt score
+  for (const ev of allEvaluations) {
+    //  Save score to prompt row
     await supabaseAdmin
       .from("prompts")
       .update({
@@ -126,20 +122,14 @@ Return ONLY valid JSON:
       })
       .eq("id", ev.prompt_id);
 
-    // 2️⃣ Ensure player exists (FK safety)
+    //  Reset Player Ready State (Safe Update)
     await supabaseAdmin
       .from("room_players")
-      .upsert(
-        {
-          room_id,
-          user_id: ev.user_id,
-          is_ready: false,
-          is_host: false,
-        },
-        { onConflict: "room_id,user_id" },
-      );
+      .update({ is_ready: false }) 
+      .eq("room_id", room_id)
+      .eq("user_id", ev.user_id);
 
-    // 3️⃣ Increment cumulative score
+    //  Increment Score
     const { error } = await supabaseAdmin.rpc(
       "increment_player_score",
       {
@@ -154,35 +144,18 @@ Return ONLY valid JSON:
     }
   }
 
-  /* ---------------- BROADCAST RESULTS ---------------- */
+  /* ---------------- 6. BROADCAST ---------------- */
 
-// 1️⃣ Results ready (clients render leaderboard)
-await supabaseAdmin
-  .channel(`room-phase-${room_id}`)
-  .send({
-    type: "broadcast",
-    event: "results_ready",
-    payload: { round_id },
-  });
-
-// 2️⃣ Start intermission AFTER results (15s)
-setTimeout(async () => {
   await supabaseAdmin
     .channel(`room-phase-${room_id}`)
     .send({
       type: "broadcast",
-      event: "intermission",
-      payload: {
-        seconds: 15,
-        round_id,
-      },
+      event: "results_ready",
+      payload: { round_id },
     });
-}, 500); // small delay so results UI mounts
 
-// 3️⃣ API response
-return res.status(200).json({
-  success: true,
-  evaluations,
-});
-
+  return res.status(200).json({
+    success: true,
+    evaluations: allEvaluations,
+  });
 }

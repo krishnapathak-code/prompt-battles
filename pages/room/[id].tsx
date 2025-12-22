@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabase";
 
@@ -55,8 +55,8 @@ export default function RoomPage() {
   const [loadingEval, setLoadingEval] = useState(false);
   const [showRoundIntro, setShowRoundIntro] = useState(false);
   const [roundNumber, setRoundNumber] = useState<number | null>(null);
-  const [totalRounds, setTotalRounds] = useState<number>(3); // Default 3, fetches real count later
-  const [isTransitioning, setIsTransitioning] = useState(false); // Fixes "Starting Round..." sticking
+  const [totalRounds, setTotalRounds] = useState<number>(3);
+  const [isTransitioning, setIsTransitioning] = useState(false);
 
   // Timer State
   const [timerRoundId, setTimerRoundId] = useState<string | null>(null);
@@ -74,7 +74,6 @@ export default function RoomPage() {
   /* ---------------- FETCH ROOM INFO ---------------- */
   useEffect(() => {
     if (!roomId) return;
-    // Get total rounds so we know when to end the game
     supabase
       .from("rooms")
       .select("total_rounds")
@@ -85,8 +84,8 @@ export default function RoomPage() {
       });
   }, [roomId]);
 
-  /* ---------------- LOAD PLAYERS ---------------- */
-  const loadPlayers = async () => {
+  /* ---------------- LOAD PLAYERS (STABLE) ---------------- */
+  const loadPlayers = useCallback(async () => {
     if (!roomId || !userId) return;
 
     const { data } = await supabase
@@ -101,7 +100,7 @@ export default function RoomPage() {
       .eq("room_id", roomId);
 
     setPlayers((data as Player[]) || []);
-  };
+  }, [roomId, userId]);
 
   /* ---------------- REALTIME ---------------- */
   useEffect(() => {
@@ -129,7 +128,7 @@ export default function RoomPage() {
       .channel(`room-phase-${roomId}`)
       /* ---- PHASE UPDATE (NEW ROUND) ---- */
       .on("broadcast", { event: "phase_update" }, (payload) => {
-        setIsTransitioning(false); // Stop loader
+        setIsTransitioning(false);
         setBattlePhase("submission");
         setTimeLeft(payload.payload.time);
         setImageURL(payload.payload.image_url);
@@ -187,7 +186,7 @@ export default function RoomPage() {
 
       /* ---- GAME FINISHED ---- */
       .on("broadcast", { event: "game_finished" }, async () => {
-        setIsTransitioning(false); // Stop any loaders
+        setIsTransitioning(false);
         await loadPlayers();
         setBattlePhase("finished");
         setNextRoundTimer(null);
@@ -199,37 +198,58 @@ export default function RoomPage() {
       supabase.removeChannel(playersChannel);
       supabase.removeChannel(phaseChannel);
     };
-  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds]);
+  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds, roundNumber, loadPlayers]);
 
   /* ---------------- DERIVED STATE ---------------- */
   const me = players.find((p) => p.user_id === userId);
   const isHost = me?.is_host === true;
   const isReady = me?.is_ready === true;
   const nonHostPlayers = players.filter((p) => !p.is_host);
-  const allPlayersReady =
-    nonHostPlayers.length === 0 ||
-    nonHostPlayers.every((p) => p.is_ready === true);
+  
+  // FIX: Allow game start if NO other players exist (Single Player) OR if all others are ready
+  const allPlayersReady = nonHostPlayers.every((p) => p.is_ready === true);
+  
   const myResult = results.find((r) => r.user_id === userId);
 
-  /* ---------------- GAME TIMER ---------------- */
-  useEffect(() => {
+  /* ---------------- GAME TIMER (SUBMISSION) ---------------- */
+useEffect(() => {
     if (battlePhase !== "submission") return;
-    setTimeLeft(60);
-
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
-          setLoadingEval(true);
-          fetch("/api/battle/score-prompts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              room_id: roomId,
-              round_id: currentRoundId,
-              image_url: imageURL,
-            }),
-          }).catch(() => setLoadingEval(false));
+
+          const triggerScoring = () => {
+            if (isHost) {
+              setLoadingEval(true);
+              fetch("/api/battle/score-prompts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  room_id: roomId,
+                  round_id: currentRoundId,
+                  image_url: imageURL,
+                }),
+              }).catch(() => setLoadingEval(false));
+            }
+          };
+
+          if (!submitted) {
+            setSubmitted(true);
+            fetch("/api/battle/submit-prompt", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                room_id: roomId,
+                round_id: currentRoundId,
+                user_id: userId,
+                prompt_text: promptText || "",
+              }),
+            }).then(() => triggerScoring());
+          } else {
+            triggerScoring();
+          }
+
           return 0;
         }
         return prev - 1;
@@ -237,15 +257,15 @@ export default function RoomPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [battlePhase, roomId, currentRoundId, imageURL]);
+  }, [battlePhase, roomId, currentRoundId, imageURL, submitted, promptText, userId, isHost]);
 
-  /* ---------------- NEXT ROUND TIMER ---------------- */
+  /* ---------------- NEXT ROUND TIMER (TRANSITION) ---------------- */
   useEffect(() => {
     if (nextRoundTimer === null) return;
 
     if (nextRoundTimer === 0) {
       setNextRoundTimer(null);
-      setIsTransitioning(true); // START LOADING
+      setIsTransitioning(true);
 
       // Reset local UI
       setResults([]);
@@ -255,7 +275,6 @@ export default function RoomPage() {
       setImageURL(null);
       setRoundNumber(null);
 
-      // Anyone can trigger advance now (handled safely by backend)
       fetch("/api/battle/advance-round", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -427,7 +446,7 @@ export default function RoomPage() {
                       }),
                     });
                   }}
-                >
+                > 
                   {submitted ? "Locked ✔" : "Lock In Prompt"}
                 </Button>
               </div>
@@ -585,7 +604,17 @@ export default function RoomPage() {
 
       {/* ROUND INTRO POPUP */}
       {showRoundIntro && roundNumber && (
-        <div className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-[200] scale-125 opacity-100 transition-all duration-1000 ease-in-out">
+        <div
+          className={`
+            fixed left-1/2 z-[200]
+            transition-all duration-1000 ease-in-out
+            ${
+              showRoundIntro
+                ? "top-1/2 -translate-x-1/2 -translate-y-1/2 scale-125 opacity-100"
+                : "top-6 -translate-x-1/2 scale-90 opacity-80"
+            }
+          `}
+        >
           <div className="px-10 py-5 rounded-3xl bg-gradient-to-r from-indigo-600 to-purple-600 shadow-2xl">
             <span className="text-4xl font-extrabold tracking-wide">
               ROUND {roundNumber}
