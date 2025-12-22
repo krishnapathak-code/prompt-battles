@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabase";
 
@@ -84,8 +84,8 @@ export default function RoomPage() {
       });
   }, [roomId]);
 
-  /* ---------------- LOAD PLAYERS ---------------- */
-  const loadPlayers = async () => {
+  /* ---------------- LOAD PLAYERS (STABLE) ---------------- */
+  const loadPlayers = useCallback(async () => {
     if (!roomId || !userId) return;
 
     const { data } = await supabase
@@ -100,7 +100,7 @@ export default function RoomPage() {
       .eq("room_id", roomId);
 
     setPlayers((data as Player[]) || []);
-  };
+  }, [roomId, userId]);
 
   /* ---------------- REALTIME ---------------- */
   useEffect(() => {
@@ -198,41 +198,58 @@ export default function RoomPage() {
       supabase.removeChannel(playersChannel);
       supabase.removeChannel(phaseChannel);
     };
-  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds, roundNumber]); // Added roundNumber dependency
+  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds, roundNumber, loadPlayers]);
 
   /* ---------------- DERIVED STATE ---------------- */
   const me = players.find((p) => p.user_id === userId);
   const isHost = me?.is_host === true;
   const isReady = me?.is_ready === true;
   const nonHostPlayers = players.filter((p) => !p.is_host);
-  const allPlayersReady =
-    nonHostPlayers.every((p) => p.is_ready === true);
+  
+  // FIX: Allow game start if NO other players exist (Single Player) OR if all others are ready
+  const allPlayersReady = nonHostPlayers.every((p) => p.is_ready === true);
+  
   const myResult = results.find((r) => r.user_id === userId);
 
-  /* ---------------- GAME TIMER (SUBMISSION PHASE) ---------------- */
-  useEffect(() => {
+  /* ---------------- GAME TIMER (SUBMISSION) ---------------- */
+useEffect(() => {
     if (battlePhase !== "submission") return;
-    
-    // NOTE: In a real app, you might sync this with server time rather than reset to 60
-    setTimeLeft(60); 
-
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
-          setLoadingEval(true);
-          
-          // Only trigger score calc if we haven't already (or let backend handle deduplication)
-          fetch("/api/battle/score-prompts", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              room_id: roomId,
-              round_id: currentRoundId,
-              image_url: imageURL,
-            }),
-          }).catch(() => setLoadingEval(false));
-          
+
+          const triggerScoring = () => {
+            if (isHost) {
+              setLoadingEval(true);
+              fetch("/api/battle/score-prompts", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                  room_id: roomId,
+                  round_id: currentRoundId,
+                  image_url: imageURL,
+                }),
+              }).catch(() => setLoadingEval(false));
+            }
+          };
+
+          if (!submitted) {
+            setSubmitted(true);
+            fetch("/api/battle/submit-prompt", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                room_id: roomId,
+                round_id: currentRoundId,
+                user_id: userId,
+                prompt_text: promptText || "",
+              }),
+            }).then(() => triggerScoring());
+          } else {
+            triggerScoring();
+          }
+
           return 0;
         }
         return prev - 1;
@@ -240,7 +257,39 @@ export default function RoomPage() {
     }, 1000);
 
     return () => clearInterval(interval);
-  }, [battlePhase, roomId, currentRoundId, imageURL]);
+  }, [battlePhase, roomId, currentRoundId, imageURL, submitted, promptText, userId, isHost]);
+
+  /* ---------------- NEXT ROUND TIMER (TRANSITION) ---------------- */
+  useEffect(() => {
+    if (nextRoundTimer === null) return;
+
+    if (nextRoundTimer === 0) {
+      setNextRoundTimer(null);
+      setIsTransitioning(true);
+
+      // Reset local UI
+      setResults([]);
+      setPromptText("");
+      setSubmitted(false);
+      setTimeLeft(0);
+      setImageURL(null);
+      setRoundNumber(null);
+
+      fetch("/api/battle/advance-round", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room_id: roomId, user_id: userId }),
+      }).catch(() => setIsTransitioning(false));
+
+      return;
+    }
+
+    const t = setTimeout(() => {
+      setNextRoundTimer((v) => (v ? v - 1 : null));
+    }, 1000);
+
+    return () => clearTimeout(t);
+  }, [nextRoundTimer, roomId, userId]);
 
   /* ---------------- NEXT ROUND TIMER (RESULTS PHASE) ---------------- */
   useEffect(() => {
@@ -429,7 +478,7 @@ export default function RoomPage() {
                       }),
                     });
                   }}
-                >
+                > 
                   {submitted ? "Locked ✔" : "Lock In Prompt"}
                 </Button>
               </div>
