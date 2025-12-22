@@ -1,21 +1,28 @@
 "use client";
 
 import { useRouter } from "next/router";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabase";
+import { motion, AnimatePresence } from "framer-motion";
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
+import { Copy, Check, ClipboardCheck } from "lucide-react"; // 👈 ADDED ICONS
+
+/* ---------------- UTILS ---------------- */
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+const noiseBg = `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E")`;
 
 /* ---------------- TYPES ---------------- */
 type Player = {
   user_id: string;
   is_host?: boolean;
   is_ready?: boolean;
-  users?: {
-    name: string;
-  } | null;
-  player_scores?: {
-    total_score: number;
-  } | null;
+  users?: { name: string } | null;
+  player_scores?: { total_score: number } | null;
 };
 
 type PromptResult = {
@@ -24,9 +31,7 @@ type PromptResult = {
   scores?: number;
   justification?: string;
   user_id: string;
-  users?: {
-    name: string;
-  } | null;
+  users?: { name: string } | null;
 };
 
 type BattlePhase = "waiting" | "submission" | "results" | "finished";
@@ -38,10 +43,11 @@ export default function RoomPage() {
   const { id } = router.query;
   const roomId = typeof id === "string" ? id : null;
 
+  /* --- STATE --- */
   const [players, setPlayers] = useState<Player[]>([]);
   const [battlePhase, setBattlePhase] = useState<BattlePhase>("waiting");
-
-  // Game State
+  
+  // Game Data
   const [timeLeft, setTimeLeft] = useState(60);
   const [imageURL, setImageURL] = useState<string | null>(null);
   const [promptText, setPromptText] = useState("");
@@ -49,85 +55,166 @@ export default function RoomPage() {
   const [results, setResults] = useState<PromptResult[]>([]);
   const [currentRoundId, setCurrentRoundId] = useState<string | null>(null);
   const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
-
-  // User & Loading State
+  
+  // UI State
+  const [isStarting, setIsStarting] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [loadingEval, setLoadingEval] = useState(false);
-  const [showRoundIntro, setShowRoundIntro] = useState(false);
   const [roundNumber, setRoundNumber] = useState<number | null>(null);
   const [totalRounds, setTotalRounds] = useState<number>(3);
   const [isTransitioning, setIsTransitioning] = useState(false);
 
-  // Timer State
+  // Copy/Clipboard State
+  const [copied, setCopied] = useState(false);
+  const [showHostPopup, setShowHostPopup] = useState(false);
+  const hasShownPopupRef = useRef(false);
+
+  // Timers
   const [timerRoundId, setTimerRoundId] = useState<string | null>(null);
   const [nextRoundTimer, setNextRoundTimer] = useState<number | null>(null);
 
-  const gameStarted = battlePhase === "submission" || battlePhase === "results";
-
-  /* ---------------- AUTH ---------------- */
+  // Refs
+  const promptTextRef = useRef(promptText);
+  
   useEffect(() => {
-    supabase.auth.getUser().then(({ data }) => {
-      setUserId(data.user?.id || null);
-    });
+    promptTextRef.current = promptText;
+  }, [promptText]);
+
+  /* ---------------- AUTH & INIT ---------------- */
+  useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null));
   }, []);
 
-  /* ---------------- FETCH ROOM INFO ---------------- */
   useEffect(() => {
     if (!roomId) return;
-    supabase
-      .from("rooms")
-      .select("total_rounds")
-      .eq("id", roomId)
-      .single()
-      .then(({ data }) => {
-        if (data) setTotalRounds(data.total_rounds);
-      });
+    supabase.from("rooms").select("total_rounds").eq("id", roomId).single()
+      .then(({ data }) => { if (data) setTotalRounds(data.total_rounds); });
   }, [roomId]);
 
-  /* ---------------- LOAD PLAYERS (STABLE) ---------------- */
+  /* ---------------- DATA FETCHING ---------------- */
   const loadPlayers = useCallback(async () => {
     if (!roomId || !userId) return;
-
     const { data } = await supabase
       .from("room_players")
-      .select(`
-        user_id,
-        is_host,
-        is_ready,
-        users ( name ),
-        player_scores ( total_score )
-      `)
+      .select(`user_id, is_host, is_ready, users(name), player_scores(total_score)`)
       .eq("room_id", roomId);
-
     setPlayers((data as Player[]) || []);
   }, [roomId, userId]);
 
-  /* ---------------- REALTIME ---------------- */
+  /* ---------------- HANDLERS ---------------- */
+  const me = players.find((p) => p.user_id === userId);
+  const isHost = me?.is_host === true;
+  const isReady = me?.is_ready === true;
+  const allPlayersReady = players.length === 1 
+    ? true 
+    : players.filter(p => !p.is_host).every(p => p.is_ready);
+    
+  const myResult = results.find((r) => r.user_id === userId);
+
+  // 📋 NEW: Manual Copy Handler
+  const handleCopy = () => {
+    if (roomId) {
+        navigator.clipboard.writeText(roomId);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+    }
+  };
+
+  const handleStart = async () => {
+    try {
+      setIsStarting(true);
+      const res = await fetch("/api/battle/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room_id: roomId, user_id: userId }),
+      });
+      if (!res.ok) throw new Error("Failed to start");
+    } catch (error) {
+      console.error(error);
+      setIsStarting(false);
+    }
+  };
+
+  const handleReady = async () => {
+    await fetch("/api/room/ready", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, user_id: userId, is_ready: !isReady }),
+    });
+  };
+
+  const triggerScoring = useCallback(() => {
+    fetch("/api/battle/score-prompts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, image_url: imageURL }),
+    }).catch(() => setLoadingEval(false));
+  }, [roomId, currentRoundId, imageURL]);
+
+  const handleSubmit = async () => {
+    setSubmitted(true);
+    await fetch("/api/battle/submit-prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, user_id: userId, prompt_text: promptText }),
+    });
+  };
+
+  const handleAutoSubmit = useCallback(async () => {
+    setSubmitted(true);
+    const finalPrompt = promptTextRef.current; 
+    
+    await fetch("/api/battle/submit-prompt", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, user_id: userId, prompt_text: finalPrompt || "" }),
+    });
+    
+    if (isHost) triggerScoring();
+  }, [roomId, currentRoundId, userId, isHost, triggerScoring]);
+
+  const handleNextRound = useCallback(() => {
+    setIsTransitioning(true);
+    setResults([]); setPromptText(""); setSubmitted(false); setTimeLeft(0); setImageURL(null);
+    
+    fetch("/api/battle/advance-round", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ room_id: roomId, user_id: userId }),
+    }).catch(() => setIsTransitioning(false));
+  }, [roomId, userId]);
+
+  /* ---------------- EFFECTS ---------------- */
+
+  // 🔔 NEW: Host Initial Popup (Only once per session)
+  useEffect(() => {
+    if (battlePhase === "waiting" && userId && players.length > 0) {
+        const currentUser = players.find(p => p.user_id === userId);
+        if (currentUser?.is_host && !hasShownPopupRef.current) {
+            setShowHostPopup(true);
+            hasShownPopupRef.current = true;
+            setTimeout(() => setShowHostPopup(false), 4000);
+        }
+    }
+  }, [battlePhase, userId, players]);
+
+  /* ---------------- REALTIME LOGIC ---------------- */
   useEffect(() => {
     if (!roomId || !userId) return;
 
     loadPlayers();
 
     const playersChannel = supabase
-      .channel(`room-${roomId}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "room_players",
-          filter: `room_id=eq.${roomId}`,
-        },
-        async () => {
-          await loadPlayers();
-        }
+      .channel(`room-players-${roomId}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "room_players", filter: `room_id=eq.${roomId}` }, 
+        () => loadPlayers()
       )
       .subscribe();
 
-    const phaseChannel = supabase
-      .channel(`room-phase-${roomId}`)
-      /* ---- PHASE UPDATE (NEW ROUND) ---- */
+    const gameChannel = supabase
+      .channel(`room-phase-${roomId}`) 
       .on("broadcast", { event: "phase_update" }, (payload) => {
+        setIsStarting(false);
         setIsTransitioning(false);
         setBattlePhase("submission");
         setTimeLeft(payload.payload.time);
@@ -135,56 +222,39 @@ export default function RoomPage() {
 
         setCurrentRoundId(payload.payload.round_id);
         setActiveRoundId(payload.payload.round_id);
-
         setResults([]);
         setPromptText("");
         setSubmitted(false);
         setNextRoundTimer(null);
         setTimerRoundId(null);
-
         setRoundNumber(payload.payload.round_number);
-        setShowRoundIntro(true);
-        setTimeout(() => setShowRoundIntro(false), 1500);
+        setLoadingEval(false);
       })
 
       /* ---- RESULTS READY ---- */
       .on("broadcast", { event: "results_ready" }, async (payload) => {
         setLoadingEval(false);
-
-        if (activeRoundId && payload.payload.round_id !== activeRoundId) {
-          return;
-        }
+        if (activeRoundId && payload.payload.round_id !== activeRoundId) return;
 
         await loadPlayers();
-
         const { data } = await supabase
           .from("prompts")
-          .select(`
-            id,
-            prompt_text,
-            scores,
-            justification,
-            user_id,
-            users ( name )
-          `)
+          .select(`id, prompt_text, scores, justification, user_id, users(name)`)
           .eq("round_id", payload.payload.round_id)
           .order("scores", { ascending: false });
 
         setResults((data as PromptResult[]) || []);
         setBattlePhase("results");
 
-        // ONLY start timer if rounds are left
         if (roundNumber && roundNumber < totalRounds) {
           if (timerRoundId !== payload.payload.round_id) {
             setTimerRoundId(payload.payload.round_id);
             setNextRoundTimer(15);
           }
         } else {
-          setNextRoundTimer(null);
+            setNextRoundTimer(null);
         }
       })
-
-      /* ---- GAME FINISHED ---- */
       .on("broadcast", { event: "game_finished" }, async () => {
         setIsTransitioning(false);
         await loadPlayers();
@@ -196,462 +266,346 @@ export default function RoomPage() {
 
     return () => {
       supabase.removeChannel(playersChannel);
-      supabase.removeChannel(phaseChannel);
+      supabase.removeChannel(gameChannel);
     };
-  }, [roomId, userId, timerRoundId, activeRoundId, totalRounds, roundNumber, loadPlayers]);
+  }, [roomId, userId, activeRoundId, roundNumber, totalRounds, loadPlayers, timerRoundId]);
 
-  /* ---------------- DERIVED STATE ---------------- */
-  const me = players.find((p) => p.user_id === userId);
-  const isHost = me?.is_host === true;
-  const isReady = me?.is_ready === true;
-  const nonHostPlayers = players.filter((p) => !p.is_host);
-  
-  // FIX: Allow game start if NO other players exist (Single Player) OR if all others are ready
-  const allPlayersReady = nonHostPlayers.every((p) => p.is_ready === true);
-  
-  const myResult = results.find((r) => r.user_id === userId);
-
-  /* ---------------- GAME TIMER (SUBMISSION) ---------------- */
-useEffect(() => {
+  /* ---------------- TIMERS ---------------- */
+  useEffect(() => {
     if (battlePhase !== "submission") return;
     const interval = setInterval(() => {
       setTimeLeft((prev) => {
         if (prev <= 1) {
           clearInterval(interval);
+          setLoadingEval(true); 
 
-          const triggerScoring = () => {
-            if (isHost) {
-              setLoadingEval(true);
-              fetch("/api/battle/score-prompts", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  room_id: roomId,
-                  round_id: currentRoundId,
-                  image_url: imageURL,
-                }),
-              }).catch(() => setLoadingEval(false));
-            }
-          };
-
-          if (!submitted) {
-            setSubmitted(true);
-            fetch("/api/battle/submit-prompt", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                room_id: roomId,
-                round_id: currentRoundId,
-                user_id: userId,
-                prompt_text: promptText || "",
-              }),
-            }).then(() => triggerScoring());
-          } else {
-            triggerScoring();
-          }
-
+          if (!submitted) handleAutoSubmit();
+          else if (isHost) triggerScoring();
+          
           return 0;
         }
         return prev - 1;
       });
     }, 1000);
-
     return () => clearInterval(interval);
-  }, [battlePhase, roomId, currentRoundId, imageURL, submitted, promptText, userId, isHost]);
+  }, [battlePhase, submitted, isHost, handleAutoSubmit, triggerScoring]);
 
-  /* ---------------- NEXT ROUND TIMER (TRANSITION) ---------------- */
   useEffect(() => {
     if (nextRoundTimer === null) return;
-
     if (nextRoundTimer === 0) {
       setNextRoundTimer(null);
-      setIsTransitioning(true);
-
-      // Reset local UI
-      setResults([]);
-      setPromptText("");
-      setSubmitted(false);
-      setTimeLeft(0);
-      setImageURL(null);
-      setRoundNumber(null);
-
-      fetch("/api/battle/advance-round", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ room_id: roomId, user_id: userId }),
-      }).catch(() => setIsTransitioning(false));
-
+      if (isHost) {
+        handleNextRound();
+      } else {
+        setIsTransitioning(true);
+        setResults([]); 
+        setPromptText("");
+        setSubmitted(false);
+        setTimeLeft(0);
+        setImageURL(null);
+      }
       return;
     }
-
-    const t = setTimeout(() => {
-      setNextRoundTimer((v) => (v ? v - 1 : null));
-    }, 1000);
-
+    const t = setTimeout(() => setNextRoundTimer((v) => (v ? v - 1 : null)), 1000);
     return () => clearTimeout(t);
-  }, [nextRoundTimer, roomId, userId]);
+  }, [nextRoundTimer, handleNextRound, isHost]);
 
-  /* ---------------- NEXT ROUND TIMER (RESULTS PHASE) ---------------- */
-  useEffect(() => {
-    if (nextRoundTimer === null) return;
-
-    if (nextRoundTimer === 0) {
-      setNextRoundTimer(null);
-      setIsTransitioning(true);
-
-      // Reset local UI
-      setResults([]);
-      setPromptText("");
-      setSubmitted(false);
-      setTimeLeft(0);
-      setImageURL(null);
-      setRoundNumber(null);
-
-      fetch("/api/battle/advance-round", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ room_id: roomId, user_id: userId }),
-      }).catch(() => setIsTransitioning(false));
-
-      return;
-    }
-
-    const t = setTimeout(() => {
-      setNextRoundTimer((v) => (v && v > 0 ? v - 1 : 0));
-    }, 1000);
-
-    return () => clearTimeout(t);
-  }, [nextRoundTimer, roomId, userId]);
-
-  /* ---------------- UI ---------------- */
+  /* ---------------- UI RENDER ---------------- */
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-[#0B0F14] via-[#0E1320] to-[#0B0F14] text-gray-100">
-      <div className="max-w-[1500px] mx-auto px-10 py-8 flex gap-10">
-        
-        {/* SIDEBAR */}
-        <aside className="w-[300px] bg-[#111827]/90 backdrop-blur rounded-3xl border border-gray-800 p-6 shadow-2xl sticky top-8 h-fit">
-          <h2 className="text-xl font-semibold mb-5 tracking-tight">
-            Room Players
-          </h2>
-          {players.map((p) => (
-            <div
-              key={p.user_id}
-              className="group flex items-center gap-4 px-4 py-3 rounded-2xl mb-2 bg-[#0F172A] hover:bg-[#141E33] transition-all duration-200 hover:scale-[1.02]"
-            >
-              <div className="w-10 h-10 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center font-semibold shadow-md">
-                {p.users?.name?.[0] || "P"}
-              </div>
-              <div className="flex-1">
-                <div className="flex justify-between items-center">
-                  <span className="font-medium">
-                    {p.users?.name || "Player"}{" "}
-                    {p.is_host && <span className="text-indigo-400">(host)</span>}
-                  </span>
-                  <span className="text-sm font-semibold text-indigo-300">
-                    {p.player_scores?.total_score ?? 0}
-                  </span>
-                </div>
-                <div className="text-xs text-gray-400 flex items-center gap-2 mt-0.5">
-                  <span
-                    className={`w-2 h-2 rounded-full ${
-                      gameStarted
-                        ? "bg-indigo-400"
-                        : p.is_ready
-                        ? "bg-green-400"
-                        : "bg-gray-500"
-                    }`}
-                  />
-                  {gameStarted ? "Playing" : p.is_ready ? "Ready" : "Waiting"}
-                </div>
-              </div>
-            </div>
-          ))}
-        </aside>
+    <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans selection:bg-orange-500/30 flex flex-col overflow-hidden">
+      <div className="fixed inset-0 pointer-events-none z-0 mix-blend-overlay" style={{ backgroundImage: noiseBg }}></div>
+      <div className="fixed top-[-20%] left-[-10%] w-[50vw] h-[50vw] bg-zinc-800/30 blur-[150px] rounded-full pointer-events-none" />
+      <div className="fixed bottom-[-20%] right-[-10%] w-[50vw] h-[50vw] bg-orange-900/10 blur-[150px] rounded-full pointer-events-none" />
 
-        {/* MAIN CONTENT */}
-        <main className="flex-1 bg-[#111827]/80 backdrop-blur rounded-3xl border border-gray-800 shadow-2xl p-12 flex flex-col items-center">
-          
-          {/* HERO TIMER (Only show if NOT finished and NOT Loading) */}
-          {battlePhase !== "results" && battlePhase !== "finished" && !isTransitioning && (
-            <div className="mb-8 text-center">
-              <div className="text-7xl font-bold tracking-tight text-indigo-400 drop-shadow">
-                {timeLeft}s
-              </div>
-              <p className="text-sm text-gray-400 mt-1">Time remaining</p>
-            </div>
-          )}
-
-          {/* TRANSITION LOADER */}
-          {isTransitioning && battlePhase !== "finished" && (
-            <div className="flex flex-col items-center justify-center h-64 animate-pulse">
-              <div className="text-2xl font-bold text-indigo-400">
-                Starting Round {roundNumber ? roundNumber + 1 : "..."}
-              </div>
-              <p className="text-gray-500 mt-2">Generating new image...</p>
-            </div>
-          )}
-
-          {/* IMAGE */}
-          {imageURL && !isTransitioning && battlePhase !== "finished" && (
-            <div className="bg-[#0F172A] rounded-3xl p-6 border border-gray-800 shadow-xl mb-8 transition-all duration-300 hover:scale-[1.01]">
-              <img
-                src={imageURL}
-                alt="Round"
-                className="rounded-2xl max-h-[420px] object-contain mx-auto"
-              />
-            </div>
-          )}
-
-          {/* WAITING PHASE */}
-          {battlePhase === "waiting" && (
-            <div className="flex flex-col items-center gap-6">
-              {!isHost && (
-                <Button
-                  className="px-10 py-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 transition-all duration-200 hover:scale-[1.05]"
-                  onClick={async () => {
-                    if (!roomId || !userId) return;
-                    await fetch("/api/room/ready", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        room_id: roomId,
-                        user_id: userId,
-                        is_ready: !isReady,
-                      }),
-                    });
-                  }}
-                >
-                  {isReady ? "Unready" : "Ready Up"}
-                </Button>
-              )}
-
-              {isHost && (
-                <>
-                  <Button
-                    disabled={!allPlayersReady}
-                    className="px-12 py-4 rounded-2xl bg-green-600 hover:bg-green-500 disabled:opacity-40 transition-all duration-200 hover:scale-[1.05]"
-                    onClick={async () => {
-                      if (!roomId || !userId) return;
-                      await fetch("/api/battle/start", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                      });
-                    }}
-                  >
-                    Start Round
-                  </Button>
-                  {!allPlayersReady && (
-                    <p className="text-sm text-gray-400">
-                      Waiting for participants to get ready…
-                    </p>
-                  )}
-                </>
-              )}
-            </div>
-          )}
-
-          {/* SUBMISSION PHASE */}
-          {battlePhase === "submission" && !isTransitioning && (
-            <div className="w-full max-w-2xl flex flex-col gap-6">
-              <textarea
-                className="bg-[#0F172A] border border-gray-700 rounded-2xl p-6 text-base resize-none focus:outline-none focus:ring-2 focus:ring-indigo-500 shadow-inner"
-                placeholder="Write your prompt here..."
-                value={promptText}
-                onChange={(e) => setPromptText(e.target.value)}
-              />
-              <div className="flex justify-end">
-                <Button
-                  disabled={!promptText || submitted}
-                  className="px-10 py-4 rounded-2xl bg-indigo-600 hover:bg-indigo-500 transition-all duration-200 hover:scale-[1.05]"
-                  onClick={() => {
-                    setSubmitted(true);
-                    fetch("/api/battle/submit-prompt", {
-                      method: "POST",
-                      headers: { "Content-Type": "application/json" },
-                      body: JSON.stringify({
-                        room_id: roomId,
-                        round_id: currentRoundId,
-                        user_id: userId,
-                        prompt_text: promptText,
-                      }),
-                    });
-                  }}
-                > 
-                  {submitted ? "Locked ✔" : "Lock In Prompt"}
-                </Button>
-              </div>
-            </div>
-          )}
-
-          {/* RESULTS PHASE */}
-          {!loadingEval && results.length > 0 && battlePhase === "results" && (
-            <div className="w-full max-w-xl animate-fade-in">
-              <h2 className="text-4xl font-bold mb-8 text-center tracking-tight">
-                Leaderboard
-              </h2>
-              {results.map((r, i) => (
-                <div
-                  key={r.id}
-                  className={`grid grid-cols-[50px_1fr_100px] items-center px-8 py-5 rounded-2xl mb-4 transition-all duration-200 ${
-                    i === 0
-                      ? "bg-gradient-to-r from-indigo-600 to-purple-600 shadow-2xl scale-[1.02]"
-                      : "bg-[#0F172A] hover:bg-[#141E33]"
-                  }`}
-                >
-                  <span className="text-xl font-bold">{i + 1}</span>
-                  <span className="text-lg">
-                    {r.users?.name || "Player"} {i === 0 && "🏆"}
-                  </span>
-                  <span className="text-xl font-bold text-right">
-                    {r.scores}
-                  </span>
-                </div>
-              ))}
-
-              {myResult && (
-                <>
-                  <h3 className="text-2xl font-semibold mt-8 mb-3">
-                    AI Evaluation
-                  </h3>
-                  <div className="bg-[#0F172A] p-6 rounded-2xl shadow-inner border border-gray-800">
-                    <p className="font-semibold text-lg text-indigo-300">
-                      Score: {myResult.scores}
-                    </p>
-                    <p className="text-gray-300 mt-2 italic">
-                      "{myResult.justification}"
-                    </p>
-                  </div>
-                </>
-              )}
-
-              {/* Next Round Timer */}
-              {nextRoundTimer !== null && (
-                <div className="mt-10 text-center">
-                  <p className="text-lg text-gray-400">Next round starts in</p>
-                  <p className="text-5xl font-bold text-indigo-400 mt-2">
-                    {nextRoundTimer}s
-                  </p>
-                </div>
-              )}
-
-              {/* View Final Podium Button (Only Last Round) */}
-              {roundNumber === totalRounds && nextRoundTimer === null && (
-                <div className="mt-10 text-center">
-                  <Button
-                    className="px-12 py-4 rounded-2xl bg-gradient-to-r from-yellow-500 to-orange-500 hover:scale-[1.05] text-white font-bold text-lg shadow-xl transition-all"
-                    onClick={() => {
-                      setIsTransitioning(true);
-                      fetch("/api/battle/advance-round", {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify({ room_id: roomId, user_id: userId }),
-                      });
-                    }}
-                  >
-                    View Final Podium 🏆
-                  </Button>
-                </div>
-              )}
-            </div>
-          )}
-
-          {/* FINAL PODIUM (FINISHED PHASE) */}
-          {battlePhase === "finished" && (
-            <div className="w-full max-w-xl animate-fade-in">
-              <h2 className="text-5xl font-extrabold mb-10 text-center tracking-tight text-transparent bg-clip-text bg-gradient-to-r from-yellow-400 to-orange-500">
-                Final Podium 🏆
-              </h2>
-              {[...players]
-                .sort(
-                  (a, b) =>
-                    (b.player_scores?.total_score ?? 0) -
-                    (a.player_scores?.total_score ?? 0)
-                )
-                .map((p, i) => (
-                  <div
-                    key={p.user_id}
-                    className={`flex justify-between items-center px-8 py-6 rounded-3xl mb-4 shadow-xl border border-white/5 ${
-                      i === 0
-                        ? "bg-gradient-to-r from-yellow-500 to-orange-600 scale-[1.05] z-10"
-                        : i === 1
-                        ? "bg-gray-700/80 scale-[1.02]"
-                        : i === 2
-                        ? "bg-amber-800/60 scale-[1.01]"
-                        : "bg-[#0F172A]"
-                    }`}
-                  >
-                    <div className="flex items-center gap-4">
-                      <span
-                        className={`text-2xl font-bold ${
-                          i === 0 ? "text-white" : "text-gray-400"
-                        }`}
-                      >
-                        #{i + 1}
-                      </span>
-                      <span
-                        className={`text-xl font-semibold ${
-                          i === 0 ? "text-white" : "text-gray-200"
-                        }`}
-                      >
-                        {p.users?.name}
-                      </span>
-                    </div>
-                    <span
-                      className={`text-3xl font-bold ${
-                        i === 0 ? "text-white" : "text-gray-200"
-                      }`}
-                    >
-                      {p.player_scores?.total_score ?? 0}
+      {/* --- HEADER --- */}
+      <header className="relative z-50 h-20 border-b border-white/5 bg-[#09090b]/80 backdrop-blur-md flex items-center justify-between px-6 lg:px-10">
+        <div className="flex items-center gap-4">
+          <div className="w-8 h-8 rounded bg-gradient-to-br from-orange-500 to-red-500 flex items-center justify-center text-xs font-bold shadow-lg">B</div>
+          <span className="font-medium tracking-tight text-zinc-400">Battle Room</span>
+        </div>
+        <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
+            {roundNumber && (
+                <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 shadow-inner">
+                    <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                    <span className="text-sm font-semibold tracking-wide text-zinc-200">
+                        ROUND {roundNumber} <span className="text-zinc-500">/ {totalRounds}</span>
                     </span>
-                  </div>
-                ))}
+                </div>
+            )}
+        </div>
+        <div className="flex items-center gap-6">
+           {battlePhase === "submission" && !isTransitioning && (
+             <div className="flex items-center gap-2">
+                 <div className="text-right">
+                     <p className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Time Left</p>
+                     <p className={cn("text-xl font-mono font-bold leading-none", timeLeft < 10 ? "text-red-500" : "text-zinc-200")}>{timeLeft}s</p>
+                 </div>
+                 <div className="w-10 h-10 relative flex items-center justify-center">
+                    <svg className="w-full h-full -rotate-90">
+                        <circle cx="20" cy="20" r="18" className="stroke-zinc-800" strokeWidth="3" fill="none" />
+                        <circle cx="20" cy="20" r="18" className={cn("transition-all duration-1000", timeLeft < 10 ? "stroke-red-500" : "stroke-orange-500")} strokeWidth="3" fill="none" strokeDasharray="113" strokeDashoffset={113 - (113 * timeLeft) / 60} />
+                    </svg>
+                 </div>
+             </div>
+           )}
+           <div className="h-8 w-[1px] bg-white/10 mx-2 hidden lg:block" />
+           <div className="flex items-center -space-x-2">
+             {players.slice(0, 3).map(p => (
+                 <div key={p.user_id} className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">{p.users?.name?.[0]}</div>
+             ))}
+             {players.length > 3 && <div className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">+{players.length - 3}</div>}
+           </div>
+        </div>
+      </header>
 
-              <div className="mt-12 text-center">
-                <Button
-                  onClick={() => router.push("/")}
-                  className="px-8 py-3 rounded-xl bg-gray-700 hover:bg-gray-600"
+      {/* --- MAIN CONTENT --- */}
+      <main className="relative z-10 flex-1 flex flex-col p-6 lg:p-8 max-w-[1800px] mx-auto w-full">
+        
+        {/* VIEW: WAITING ROOM */}
+        {battlePhase === "waiting" && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-8 animate-in fade-in zoom-in duration-500">
+                <div className="text-center space-y-4">
+                    <h1 className="text-5xl lg:text-7xl font-bold tracking-tighter text-transparent bg-clip-text bg-gradient-to-b from-zinc-100 to-zinc-600">The Lobby</h1>
+                    <p className="text-zinc-400 text-lg">Waiting for the host to initialize the sequence.</p>
+                </div>
+
+                {/* 📋 NEW: LOBBY ROOM CODE BAR */}
+                <div 
+                    className="relative group cursor-pointer animate-in zoom-in-50 fade-in duration-500 slide-in-from-bottom-2"
+                    onClick={handleCopy}
                 >
-                  Return to Home
-                </Button>
-              </div>
-            </div>
-          )}
-        </main>
-      </div>
+                    <div className="flex items-center gap-4 bg-[#121214] border border-white/10 rounded-full pl-6 pr-2 py-2 shadow-2xl hover:border-orange-500/50 hover:bg-white/5 transition-all">
+                        <div className="flex flex-col items-start">
+                            <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Room Code</span>
+                            <span className="font-mono text-xl tracking-widest text-white">{roomId}</span>
+                        </div>
+                        <div className={cn("w-10 h-10 rounded-full flex items-center justify-center transition-all", copied ? "bg-green-500 text-black" : "bg-white/10 text-zinc-400 group-hover:bg-white/20 group-hover:text-white")}>
+                            {copied ? <Check size={18} /> : <Copy size={18} />}
+                        </div>
+                    </div>
+                    {/* Tiny feedback below */}
+                    {copied && (
+                        <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-xs text-green-500 font-mono animate-in fade-in slide-in-from-top-1 whitespace-nowrap">
+                            Copied to clipboard!
+                        </div>
+                    )}
+                </div>
 
-      {/* EVALUATING OVERLAY */}
-      {loadingEval && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-[#0F172A] border border-gray-700 rounded-3xl px-12 py-10 shadow-2xl flex flex-col items-center gap-6 animate-fade-in">
-            <div className="w-14 h-14 border-4 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin" />
-            <div className="text-center">
-              <p className="text-2xl font-semibold tracking-tight">Evaluating</p>
-              <p className="text-sm text-gray-400 mt-1">AI is scoring prompts…</p>
+                <div className="flex flex-wrap justify-center gap-3 max-w-2xl mt-4">
+                    {players.map(p => (
+                        <div key={p.user_id} className={cn("px-4 py-2 rounded-lg border flex items-center gap-2 transition-all", p.is_ready ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-zinc-900 border-zinc-800 text-zinc-500")}>
+                            <span className={cn("w-2 h-2 rounded-full", p.is_ready ? "bg-emerald-500" : "bg-zinc-600")} />
+                            {p.users?.name} {p.is_host && "👑"}
+                        </div>
+                    ))}
+                </div>
+                <div className="mt-8">
+                    {isHost ? (
+                        <Button 
+                            onClick={handleStart} 
+                            disabled={!allPlayersReady || isStarting} 
+                            className="h-14 px-8 text-lg rounded-full bg-zinc-100 text-black hover:bg-white hover:scale-105 transition-all shadow-xl disabled:opacity-50"
+                        >
+                            {isStarting ? (
+                                <span className="flex items-center gap-2">
+                                    <span className="w-4 h-4 border-2 border-black/20 border-t-black rounded-full animate-spin" />
+                                    Initiating...
+                                </span>
+                            ) : "Start Battle"}
+                        </Button>
+                    ) : (
+                        <Button 
+                            onClick={handleReady}
+                            className={cn("h-14 px-8 text-lg rounded-full transition-all hover:scale-105", isReady ? "bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20" : "bg-zinc-100 text-black hover:bg-white")}
+                        >
+                            {isReady ? "Cancel Ready" : "I am Ready"}
+                        </Button>
+                    )}
+                </div>
             </div>
-          </div>
+        )}
+
+        {/* VIEW: BATTLE */}
+        {battlePhase === "submission" && !isTransitioning && (
+            <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-6 h-full items-stretch animate-in slide-in-from-bottom-4 duration-500">
+                <div className="bg-[#121214] rounded-2xl border border-white/5 p-4 flex items-center justify-center relative overflow-hidden group shadow-2xl min-h-[50vh]">
+                    {imageURL ? <img src={imageURL} alt="Subject" className="max-w-full max-h-[70vh] object-contain rounded-lg shadow-lg z-10" /> : <div className="animate-pulse text-zinc-700">Loading Image Data...</div>}
+                    <div className="absolute inset-0 bg-[linear-gradient(rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:40px_40px] opacity-50" />
+                </div>
+                <div className="flex flex-col gap-6 justify-center max-w-xl mx-auto w-full">
+                    <div className="space-y-2">
+                        <h2 className="text-2xl font-semibold text-zinc-100">Describe the Image</h2>
+                        <p className="text-zinc-500 text-sm">Be precise. The AI judge values detail and stylistic accuracy.</p>
+                    </div>
+                    <div className="relative">
+                        <textarea
+                            value={promptText}
+                            onChange={(e) => setPromptText(e.target.value)}
+                            disabled={submitted}
+                            placeholder="Type your prompt here..."
+                            className="w-full h-64 bg-[#121214] border border-white/10 rounded-xl p-6 text-lg text-zinc-200 placeholder:text-zinc-700 focus:outline-none focus:ring-1 focus:ring-orange-500/50 resize-none transition-all shadow-inner font-light leading-relaxed"
+                        />
+                        {submitted && (
+                            <div className="absolute inset-0 bg-black/50 backdrop-blur-[2px] rounded-xl flex items-center justify-center border border-white/5">
+                                <div className="bg-zinc-900 border border-zinc-700 px-4 py-2 rounded-full text-zinc-300 flex items-center gap-2"><span className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />Prompt Locked</div>
+                            </div>
+                        )}
+                    </div>
+                    <div className="flex justify-between items-center">
+                        <span className="text-xs text-zinc-600 font-mono">ID: {userId?.slice(0, 8)}</span>
+                        <Button onClick={handleSubmit} disabled={!promptText || submitted} className="h-12 px-8 rounded-lg bg-zinc-100 text-black font-medium hover:bg-white hover:shadow-[0_0_20px_rgba(255,255,255,0.2)] transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                            {submitted ? "Waiting for timer..." : "Lock In Prompt ↵"}
+                        </Button>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* VIEW: RESULTS */}
+        {battlePhase === "results" && !loadingEval && (
+            <div className="flex-1 flex flex-col items-center justify-start gap-10 pt-10 animate-in slide-in-from-bottom-8 duration-700">
+                <div className="text-center">
+                    <h2 className="text-3xl font-bold mb-2">Round Analysis</h2>
+                    <p className="text-zinc-500">Scores calculated by AI Judge</p>
+                </div>
+                <div className="w-full max-w-4xl grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <div className="space-y-3">
+                        {results.map((r, i) => (
+                            <div key={r.id} className={cn("p-4 rounded-xl flex items-center gap-4 transition-all", i === 0 ? "bg-gradient-to-r from-orange-500/10 to-red-500/10 border border-orange-500/20" : "bg-[#121214] border border-white/5")}>
+                                <div className={cn("w-8 h-8 rounded flex items-center justify-center font-bold text-sm", i === 0 ? "bg-orange-500 text-white" : "bg-zinc-800 text-zinc-500")}>{i + 1}</div>
+                                <div className="flex-1">
+                                    <div className="flex justify-between"><span className={cn("font-medium", i === 0 ? "text-orange-200" : "text-zinc-300")}>{r.users?.name}</span><span className="font-mono font-bold">{r.scores}</span></div>
+                                    <div className="h-1 w-full bg-zinc-800 rounded-full mt-2 overflow-hidden"><div className={cn("h-full rounded-full", i === 0 ? "bg-orange-500" : "bg-zinc-600")} style={{ width: `${(r.scores || 0)}%` }} /></div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    <div className="space-y-6">
+                        {myResult ? (
+                             <div className="bg-[#121214] border border-white/5 p-6 rounded-xl h-full">
+                                <h3 className="text-xs uppercase tracking-widest text-zinc-500 mb-4">Your Performance</h3>
+                                <div className="text-4xl font-bold mb-4">{myResult.scores}<span className="text-lg text-zinc-600 font-normal">/100</span></div>
+                                <p className="text-zinc-300 italic leading-relaxed border-l-2 border-orange-500/30 pl-4">"{myResult.justification}"</p>
+                             </div>
+                        ) : (
+                            <div className="flex items-center justify-center h-full text-zinc-600 bg-[#121214] border border-white/5 rounded-xl">No data for this user.</div>
+                        )}
+                    </div>
+                </div>
+                
+                {nextRoundTimer !== null && (
+                    <div className="fixed bottom-0 left-0 w-full h-1 bg-zinc-800">
+                        <motion.div initial={{ width: "100%" }} animate={{ width: "0%" }} transition={{ duration: 15, ease: "linear" }} className="h-full bg-orange-500" />
+                    </div>
+                )}
+                
+                {roundNumber === totalRounds && nextRoundTimer === null && (
+                     <Button onClick={handleNextRound} className="mt-8 bg-zinc-100 text-black hover:bg-white hover:scale-105 transition-all h-12 px-8 rounded-full">Final Podium &rarr;</Button>
+                )}
+            </div>
+        )}
+
+        {/* VIEW: FINISHED */}
+        {battlePhase === "finished" && (
+            <div className="flex-1 flex flex-col items-center justify-center min-h-[80vh] w-full animate-in fade-in duration-700">
+                <div className="text-center mb-12 relative z-10">
+                    <h1 className="text-6xl lg:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-yellow-300 to-orange-600 drop-shadow-sm tracking-tighter italic">VICTORY</h1>
+                    <p className="text-zinc-400 text-lg mt-2 font-light">The results are in.</p>
+                </div>
+                <div className="flex items-end justify-center gap-4 lg:gap-8 w-full max-w-4xl mb-12 px-4 h-[400px]">
+                    {players.length > 1 && (() => {
+                        const p2 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[1];
+                        return (
+                            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "60%", opacity: 1 }} transition={{ delay: 0.5, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[200px]">
+                                <div className="mb-4 flex flex-col items-center gap-2"><div className="w-16 h-16 rounded-full border-2 border-zinc-500 bg-zinc-800 flex items-center justify-center text-xl font-bold text-zinc-300 shadow-xl">{p2.users?.name?.[0]}</div><span className="text-zinc-400 font-bold truncate max-w-full">{p2.users?.name}</span></div>
+                                <div className="w-full h-full bg-gradient-to-t from-zinc-800 to-zinc-600 rounded-t-lg border-t border-zinc-500 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(255,255,255,0.05)]"><span className="text-4xl font-black text-zinc-400/20 absolute top-2">2</span><span className="text-2xl font-bold text-white">{p2.player_scores?.total_score}</span></div>
+                            </motion.div>
+                        )
+                    })()}
+
+                    {(() => {
+                        const p1 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[0];
+                        return (
+                            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "80%", opacity: 1 }} transition={{ delay: 0.8, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[220px] z-10">
+                                <div className="mb-4 flex flex-col items-center gap-2 relative"><div className="absolute -top-10 text-5xl animate-bounce">👑</div><div className="w-24 h-24 rounded-full border-4 border-yellow-400 bg-zinc-800 flex items-center justify-center text-3xl font-bold text-white shadow-[0_0_30px_rgba(250,204,21,0.4)]">{p1?.users?.name?.[0]}</div><span className="text-yellow-400 font-bold text-xl truncate max-w-full">{p1?.users?.name}</span></div>
+                                <div className="w-full h-full bg-gradient-to-t from-orange-600 via-yellow-500 to-yellow-300 rounded-t-xl border-t border-yellow-200 relative flex items-end justify-center pb-6 shadow-[0_0_50px_rgba(234,179,8,0.3)]"><span className="text-6xl font-black text-white/30 absolute top-4">1</span><span className="text-4xl font-black text-black">{p1?.player_scores?.total_score}</span></div>
+                            </motion.div>
+                        )
+                    })()}
+
+                    {players.length > 2 && (() => {
+                        const p3 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[2];
+                        return (
+                            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "45%", opacity: 1 }} transition={{ delay: 0.2, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[200px]">
+                                <div className="mb-4 flex flex-col items-center gap-2"><div className="w-16 h-16 rounded-full border-2 border-orange-800 bg-zinc-800 flex items-center justify-center text-xl font-bold text-orange-700 shadow-xl">{p3.users?.name?.[0]}</div><span className="text-orange-800/80 font-bold truncate max-w-full">{p3.users?.name}</span></div>
+                                <div className="w-full h-full bg-gradient-to-t from-orange-900 to-orange-700 rounded-t-lg border-t border-orange-600 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(194,65,12,0.1)]"><span className="text-4xl font-black text-black/20 absolute top-2">3</span><span className="text-2xl font-bold text-orange-100">{p3.player_scores?.total_score}</span></div>
+                            </motion.div>
+                        )
+                    })()}
+                </div>
+                {players.length > 3 && (
+                    <div className="w-full max-w-md bg-white/5 rounded-xl border border-white/5 p-4 mb-8 max-h-40 overflow-y-auto">
+                        <h3 className="text-xs uppercase text-zinc-500 font-bold mb-3 tracking-wider">Honorable Mentions</h3>
+                        {[...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0)).slice(3).map((p, i) => (
+                                <div key={p.user_id} className="flex justify-between items-center py-2 border-b border-white/5 last:border-0"><span className="text-zinc-400 flex items-center gap-3"><span className="text-xs font-mono opacity-50">#{i + 4}</span>{p.users?.name}</span><span className="text-zinc-500 font-mono">{p.player_scores?.total_score}</span></div>
+                        ))}
+                    </div>
+                )}
+                <Button variant="outline" onClick={() => router.push("/")} className="h-12 px-8 rounded-full border-zinc-700 bg-transparent hover:bg-zinc-800 text-zinc-300 transition-all hover:scale-105">Return to Lobby</Button>
+            </div>
+        )}
+
+      </main>
+
+      {/* --- OVERLAYS --- */}
+      
+      {/* 🔔 NEW: HOST POPUP (Room Code Copied) */}
+      <AnimatePresence>
+        {showHostPopup && (
+            <motion.div 
+                initial={{ opacity: 0, y: -50, x: "-50%" }}
+                animate={{ opacity: 1, y: 0, x: "-50%" }}
+                exit={{ opacity: 0, y: -50, x: "-50%" }}
+                transition={{ type: "spring", stiffness: 300, damping: 20 }}
+                className="fixed top-8 left-1/2 z-[200] bg-white text-black px-6 py-3 rounded-full shadow-2xl flex items-center gap-3"
+            >
+                <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center text-white">
+                    <ClipboardCheck size={14} />
+                </div>
+                <div className="flex flex-col">
+                    <span className="font-bold text-sm leading-none">Room Created</span>
+                    <span className="text-[10px] text-zinc-500">Code copied to clipboard</span>
+                </div>
+            </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Loading Overlay */}
+      {isTransitioning && battlePhase !== 'finished' && (
+        <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center">
+            <div className="flex flex-col items-center gap-6">
+                <div className="w-16 h-16 border-4 border-zinc-800 border-t-orange-500 rounded-full animate-spin" />
+                <div className="text-center space-y-2">
+                    <p className="text-white font-bold tracking-widest text-xl animate-pulse">
+                        {roundNumber === totalRounds ? "CALCULATING CHAMPION..." : "GENERATING NEXT ROUND..."}
+                    </p>
+                    <p className="text-zinc-500 text-sm font-mono">
+                        {roundNumber === totalRounds ? "Finalizing scores & leaderboard" : "Preparing image data"}
+                    </p>
+                </div>
+            </div>
         </div>
       )}
 
-      {/* ROUND INTRO POPUP */}
-      {showRoundIntro && roundNumber && (
-        <div
-          className={`
-            fixed left-1/2 z-[200]
-            transition-all duration-1000 ease-in-out
-            ${
-              showRoundIntro
-                ? "top-1/2 -translate-x-1/2 -translate-y-1/2 scale-125 opacity-100"
-                : "top-6 -translate-x-1/2 scale-90 opacity-80"
-            }
-          `}
-        >
-          <div className="px-10 py-5 rounded-3xl bg-gradient-to-r from-indigo-600 to-purple-600 shadow-2xl">
-            <span className="text-4xl font-extrabold tracking-wide">
-              ROUND {roundNumber}
-            </span>
-          </div>
+      {/* Scoring Overlay */}
+      {loadingEval && (
+        <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-md flex items-center justify-center">
+            <div className="bg-[#121214] border border-white/10 p-8 rounded-2xl shadow-2xl max-w-sm text-center">
+                 <div className="mx-auto w-10 h-10 mb-4 rounded-full bg-orange-500/20 flex items-center justify-center"><span className="w-2 h-2 bg-orange-500 rounded-full animate-ping" /></div>
+                 <h3 className="text-xl font-bold text-white mb-2">Judge AI is Thinking</h3>
+                 <p className="text-zinc-500 text-sm">Analyzing semantic similarity and creativity...</p>
+            </div>
         </div>
       )}
     </div>
