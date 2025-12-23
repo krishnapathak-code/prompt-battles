@@ -1,9 +1,11 @@
 ﻿"use client";
 
 import { useRouter } from "next/router";
+import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
+import { supabase } from "@/lib/supabase";
 import { motion } from "framer-motion";
-import { Plus, Users, Swords, Trophy, Zap } from "lucide-react";
+import { Plus, Users, Swords, Zap, Loader2 } from "lucide-react"; // Added Loader2
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -16,7 +18,35 @@ const noiseBg = `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='htt
 
 export default function Home() {
   const router = useRouter();
+  const [isLoading, setIsLoading] = useState(true);
 
+  /* ---------------- AUTH PROTECTION ---------------- */
+  useEffect(() => {
+    const checkUser = async () => {
+      const { data } = await supabase.auth.getSession();
+      
+      if (!data.session) {
+        // If no user, kick them to the Auth page
+        router.replace("/auth");
+      } else {
+        // If user exists, show the dashboard
+        setIsLoading(false);
+      }
+    };
+
+    checkUser();
+  }, [router]);
+
+  /* ---------------- LOADING STATE ---------------- */
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
+         <Loader2 className="w-8 h-8 text-orange-500 animate-spin" />
+      </div>
+    );
+  }
+
+  /* ---------------- MAIN DASHBOARD ---------------- */
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans selection:bg-orange-500/30 flex flex-col relative overflow-hidden">
       {/* GLOBAL NOISE TEXTURE */}
@@ -26,7 +56,7 @@ export default function Home() {
       <div className="fixed top-[-20%] left-[-10%] w-[60vw] h-[60vw] bg-zinc-800/20 blur-[150px] rounded-full pointer-events-none animate-pulse" />
       <div className="fixed bottom-[-20%] right-[-10%] w-[60vw] h-[60vw] bg-orange-900/10 blur-[150px] rounded-full pointer-events-none animate-pulse delay-1000" />
 
-      {/* NAVBAR (Simple) */}
+      {/* NAVBAR */}
       <header className="relative z-10 w-full px-8 py-6 flex justify-between items-center max-w-7xl mx-auto">
         <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center shadow-lg shadow-orange-500/20">
@@ -35,9 +65,21 @@ export default function Home() {
             <span className="font-bold text-xl tracking-tight">Prompt<span className="text-zinc-500">Wars</span></span>
         </div>
         
-        {/* Auth Placeholder - You can add User Profile here later */}
-        <div className="px-4 py-2 rounded-full bg-white/5 border border-white/5 text-sm font-medium text-zinc-400">
-            Beta v1.0
+        <div className="flex items-center gap-4">
+             <div className="px-4 py-2 rounded-full bg-white/5 border border-white/5 text-sm font-medium text-zinc-400">
+                Beta v1.0
+            </div>
+            {/* Logout Button */}
+            <Button 
+                variant="ghost" 
+                className="text-zinc-400 hover:text-white"
+                onClick={async () => {
+                    await supabase.auth.signOut();
+                    router.push("/auth");
+                }}
+            >
+                Sign Out
+            </Button>
         </div>
       </header>
 

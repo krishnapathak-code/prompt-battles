@@ -7,7 +7,7 @@ import { supabase } from "@/lib/supabase";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { Copy, Check, ClipboardCheck } from "lucide-react"; // 👈 ADDED ICONS
+import { Copy, Check, ClipboardCheck, Settings2, Loader2 } from "lucide-react";
 
 /* ---------------- UTILS ---------------- */
 function cn(...inputs: ClassValue[]) {
@@ -44,6 +44,9 @@ export default function RoomPage() {
   const roomId = typeof id === "string" ? id : null;
 
   /* --- STATE --- */
+  // Loading State (The Robust Fix)
+  const [isRestoring, setIsRestoring] = useState(true);
+
   const [players, setPlayers] = useState<Player[]>([]);
   const [battlePhase, setBattlePhase] = useState<BattlePhase>("waiting");
   
@@ -60,10 +63,14 @@ export default function RoomPage() {
   const [isStarting, setIsStarting] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [loadingEval, setLoadingEval] = useState(false);
+  
+  // Battle State
+  const [battleId, setBattleId] = useState<string | null>(null);
   const [roundNumber, setRoundNumber] = useState<number | null>(null);
   const [totalRounds, setTotalRounds] = useState<number>(3);
+  
   const [isTransitioning, setIsTransitioning] = useState(false);
-
+  
   // Copy/Clipboard State
   const [copied, setCopied] = useState(false);
   const [showHostPopup, setShowHostPopup] = useState(false);
@@ -80,16 +87,156 @@ export default function RoomPage() {
     promptTextRef.current = promptText;
   }, [promptText]);
 
-  /* ---------------- AUTH & INIT ---------------- */
+  /* ---------------- AUTH ---------------- */
   useEffect(() => {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null));
   }, []);
 
+/* ---------------- HYDRATION (FINAL PRODUCTION FIX) ---------------- */
   useEffect(() => {
-    if (!roomId) return;
-    supabase.from("rooms").select("total_rounds").eq("id", roomId).single()
-      .then(({ data }) => { if (data) setTotalRounds(data.total_rounds); });
-  }, [roomId]);
+    if (!roomId || !userId) return;
+
+    const hydrateState = async () => {
+      setIsRestoring(true); 
+
+      try {
+        // STEP 1: Fetch Room Info
+        const { data: roomData, error: roomError } = await supabase
+            .from("rooms")
+            .select("total_rounds")
+            .eq("id", roomId)
+            .single();
+
+        if (roomError) throw roomError;
+
+        // STEP 2: Fetch Battles (Safe Select *)
+        const { data: allBattles } = await supabase
+            .from("battles")
+            .select("*") 
+            .eq("room_id", roomId);
+
+        // Priority: Active -> Finished -> Any
+        let latestBattle = allBattles?.find(b => b.status === 'active');
+        if (!latestBattle) latestBattle = allBattles?.find(b => b.status === 'finished');
+        if (!latestBattle && allBattles && allBattles.length > 0) latestBattle = allBattles[0];
+
+        // STEP 3: Handle Missing Battle
+        if (!latestBattle || latestBattle.status === 'waiting') {
+            setTotalRounds(roomData.total_rounds);
+            setBattlePhase("waiting");
+            setIsRestoring(false);
+            return;
+        }
+
+        // STEP 4: Restore Battle State
+        setBattleId(latestBattle.id);
+        setRoundNumber(latestBattle.current_round);
+        setTotalRounds(latestBattle.total_rounds || roomData.total_rounds);
+
+        if (latestBattle.status === 'finished') {
+            setBattlePhase("finished");
+            setIsRestoring(false);
+            return;
+        }
+
+        // STEP 5: Restore Active Round
+        if (latestBattle.status === 'active') {
+            
+            // 1. Fetch Round Data (Using maybeSingle to prevent 406 crash)
+            const { data: roundData, error: roundError } = await supabase
+                .from("rounds")
+                .select("*") // Fetch all columns to be safe
+                .eq("battle_id", latestBattle.id)
+                .eq("round_number", latestBattle.current_round)
+                .maybeSingle();
+
+            if (roundError || !roundData) {
+                console.error("❌ Round fetch failed:", roundError);
+                setIsRestoring(false);
+                return;
+            }
+
+            setCurrentRoundId(roundData.id);
+            setActiveRoundId(roundData.id);
+
+            // 2. Fetch Image (Using confirmed 'image_id' column)
+            // We use 'maybeSingle' so if the image is missing/blocked, it doesn't crash the app
+            if (roundData.image_id) {
+                 const { data: imageData } = await supabase
+                    .from("images")
+                    .select("url")
+                    .eq("id", roundData.image_id)
+                    .maybeSingle();
+                 
+                 if (imageData) setImageURL(imageData.url);
+            }
+
+            // 3. Calculate Time (With Fallback)
+            let calculatedTimeLeft = 60;
+            
+            // Try 'started_at', fallback to 'created_at' if started_at is null
+            const startTime = roundData.started_at || roundData.started_at;
+            
+            if (startTime) {
+                const roundStartTime = new Date(startTime).getTime();
+                const now = Date.now();
+                const elapsed = Math.floor((now - roundStartTime) / 1000);
+                calculatedTimeLeft = Math.max(0, 60 - elapsed);
+            } else {
+                console.warn("⚠️ Data Issue: Both 'started_at' and 'created_at' are null in DB.");
+            }
+            
+            setTimeLeft(calculatedTimeLeft);
+
+            // 4. Check User Submission
+            const { data: userPrompt } = await supabase
+                .from("prompts")
+                .select("prompt_text")
+                .eq("round_id", roundData.id)
+                .eq("user_id", userId)
+                .maybeSingle();
+
+            if (userPrompt) {
+                setPromptText(userPrompt.prompt_text);
+                setSubmitted(true);
+            }
+
+            // 5. Determine Phase
+            if (calculatedTimeLeft === 0) {
+                 const { count } = await supabase
+                    .from("prompts")
+                    .select("*", { count: 'exact', head: true })
+                    .eq("round_id", roundData.id)
+                    .not("scores", "is", null);
+                 
+                 if (count && count > 0) {
+                     setBattlePhase("results");
+                     const { data: resultData } = await supabase
+                          .from("prompts")
+                          .select(`id, prompt_text, scores, justification, user_id, users(name)`)
+                          .eq("round_id", roundData.id)
+                          .order("scores", { ascending: false });
+                     setResults(resultData as PromptResult[] || []);
+                 } else {
+                     setBattlePhase("submission");
+                     setLoadingEval(true);
+                 }
+            } else {
+                setBattlePhase("submission");
+                setLoadingEval(false); 
+            }
+        }
+
+      } catch (e) {
+        console.error("Hydration Error:", e);
+        setBattlePhase("waiting");
+      } finally {
+        setIsRestoring(false);
+      }
+    };
+
+    hydrateState();
+  }, [roomId, userId]);
 
   /* ---------------- DATA FETCHING ---------------- */
   const loadPlayers = useCallback(async () => {
@@ -111,7 +258,6 @@ export default function RoomPage() {
     
   const myResult = results.find((r) => r.user_id === userId);
 
-  // 📋 NEW: Manual Copy Handler
   const handleCopy = () => {
     if (roomId) {
         navigator.clipboard.writeText(roomId);
@@ -120,15 +266,24 @@ export default function RoomPage() {
     }
   };
 
+  const handleUpdateRounds = async (rounds: number) => {
+    if (!isHost || !roomId) return;
+    setTotalRounds(rounds);
+    await fetch("/api/room/update-settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ room_id: roomId, total_rounds: rounds }),
+    });
+  };
+
   const handleStart = async () => {
     try {
       setIsStarting(true);
-      const res = await fetch("/api/battle/start", {
+      await fetch("/api/battle/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ room_id: roomId, user_id: userId }),
+        body: JSON.stringify({ room_id: roomId, user_id: userId, total_rounds: totalRounds }),
       });
-      if (!res.ok) throw new Error("Failed to start");
     } catch (error) {
       console.error(error);
       setIsStarting(false);
@@ -144,19 +299,26 @@ export default function RoomPage() {
   };
 
   const triggerScoring = useCallback(() => {
+    if (!isHost) return;
     fetch("/api/battle/score-prompts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, image_url: imageURL }),
     }).catch(() => setLoadingEval(false));
-  }, [roomId, currentRoundId, imageURL]);
+  }, [roomId, currentRoundId, imageURL, isHost]);
 
   const handleSubmit = async () => {
     setSubmitted(true);
     await fetch("/api/battle/submit-prompt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, user_id: userId, prompt_text: promptText }),
+      body: JSON.stringify({ 
+          room_id: roomId, 
+          battle_id: battleId, 
+          round_id: currentRoundId, 
+          user_id: userId, 
+          prompt_text: promptText 
+      }),
     });
   };
 
@@ -167,11 +329,17 @@ export default function RoomPage() {
     await fetch("/api/battle/submit-prompt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, user_id: userId, prompt_text: finalPrompt || "" }),
+      body: JSON.stringify({ 
+          room_id: roomId, 
+          battle_id: battleId, 
+          round_id: currentRoundId, 
+          user_id: userId, 
+          prompt_text: finalPrompt || "" 
+      }),
     });
     
-    if (isHost) triggerScoring();
-  }, [roomId, currentRoundId, userId, isHost, triggerScoring]);
+    triggerScoring();
+  }, [roomId, currentRoundId, userId, triggerScoring, battleId]);
 
   const handleNextRound = useCallback(() => {
     setIsTransitioning(true);
@@ -180,40 +348,43 @@ export default function RoomPage() {
     fetch("/api/battle/advance-round", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ room_id: roomId, user_id: userId }),
+      body: JSON.stringify({ 
+          room_id: roomId, 
+          battle_id: battleId, 
+          user_id: userId 
+      }),
     }).catch(() => setIsTransitioning(false));
-  }, [roomId, userId]);
+  }, [roomId, userId, battleId]);
 
-  /* ---------------- EFFECTS ---------------- */
-
-  // 🔔 NEW: Host Initial Popup (Only once per session)
-  useEffect(() => {
-    if (battlePhase === "waiting" && userId && players.length > 0) {
-        const currentUser = players.find(p => p.user_id === userId);
-        if (currentUser?.is_host && !hasShownPopupRef.current) {
-            setShowHostPopup(true);
-            hasShownPopupRef.current = true;
-            setTimeout(() => setShowHostPopup(false), 4000);
-        }
-    }
-  }, [battlePhase, userId, players]);
-
-  /* ---------------- REALTIME LOGIC ---------------- */
+  /* ---------------- EFFECTS & REALTIME ---------------- */
+  
+  // Realtime Listeners
   useEffect(() => {
     if (!roomId || !userId) return;
-
     loadPlayers();
-
+    
     const playersChannel = supabase
       .channel(`room-players-${roomId}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "room_players", filter: `room_id=eq.${roomId}` }, 
-        () => loadPlayers()
+      .on("postgres_changes", { event: "*", schema: "public", table: "room_players", filter: `room_id=eq.${roomId}` }, () => loadPlayers())
+      .subscribe();
+
+    const settingsChannel = supabase
+      .channel(`room-settings-${roomId}`)
+      .on("postgres_changes", { event: "UPDATE", schema: "public", table: "rooms", filter: `id=eq.${roomId}` },
+        (payload) => {
+            if (payload.new && payload.new.total_rounds) {
+                setTotalRounds(payload.new.total_rounds);
+            }
+        }
       )
       .subscribe();
 
     const gameChannel = supabase
       .channel(`room-phase-${roomId}`) 
       .on("broadcast", { event: "phase_update" }, (payload) => {
+        setBattleId(payload.payload.battle_id); 
+        setTotalRounds(payload.payload.total_rounds);
+
         setIsStarting(false);
         setIsTransitioning(false);
         setBattlePhase("submission");
@@ -232,17 +403,18 @@ export default function RoomPage() {
       .on("broadcast", { event: "results_ready" }, async (payload) => {
         setLoadingEval(false);
         if (activeRoundId && payload.payload.round_id !== activeRoundId) return;
-
+        
         await loadPlayers();
+        
         const { data } = await supabase
           .from("prompts")
           .select(`id, prompt_text, scores, justification, user_id, users(name)`)
           .eq("round_id", payload.payload.round_id)
           .order("scores", { ascending: false });
-
+          
         setResults((data as PromptResult[]) || []);
         setBattlePhase("results");
-
+        
         if (roundNumber && roundNumber < totalRounds) {
           if (timerRoundId !== payload.payload.round_id) {
             setTimerRoundId(payload.payload.round_id);
@@ -263,11 +435,12 @@ export default function RoomPage() {
 
     return () => {
       supabase.removeChannel(playersChannel);
+      supabase.removeChannel(settingsChannel);
       supabase.removeChannel(gameChannel);
     };
   }, [roomId, userId, activeRoundId, roundNumber, totalRounds, loadPlayers, timerRoundId]);
 
-  /* ---------------- TIMERS ---------------- */
+  /* ---------------- TIMER LOGIC ---------------- */
   useEffect(() => {
     if (battlePhase !== "submission") return;
     const interval = setInterval(() => {
@@ -275,10 +448,8 @@ export default function RoomPage() {
         if (prev <= 1) {
           clearInterval(interval);
           setLoadingEval(true); 
-
           if (!submitted) handleAutoSubmit();
           else if (isHost) triggerScoring();
-          
           return 0;
         }
         return prev - 1;
@@ -291,15 +462,10 @@ export default function RoomPage() {
     if (nextRoundTimer === null) return;
     if (nextRoundTimer === 0) {
       setNextRoundTimer(null);
-      if (isHost) {
-        handleNextRound();
-      } else {
+      if (isHost) handleNextRound();
+      else {
         setIsTransitioning(true);
-        setResults([]); 
-        setPromptText("");
-        setSubmitted(false);
-        setTimeLeft(0);
-        setImageURL(null);
+        setResults([]); setPromptText(""); setSubmitted(false); setTimeLeft(0); setImageURL(null);
       }
       return;
     }
@@ -308,6 +474,15 @@ export default function RoomPage() {
   }, [nextRoundTimer, handleNextRound, isHost]);
 
   /* ---------------- UI RENDER ---------------- */
+
+  // 1. BLOCK RENDER UNTIL STATE IS RESTORED
+  if (isRestoring) {
+    return (
+        <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
+            <Loader2 className="w-10 h-10 text-orange-500 animate-spin" />
+        </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#09090b] text-zinc-100 font-sans selection:bg-orange-500/30 flex flex-col overflow-hidden">
@@ -322,7 +497,7 @@ export default function RoomPage() {
           <span className="font-medium tracking-tight text-zinc-400">Battle Room</span>
         </div>
         <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2">
-            {roundNumber && (
+            {battlePhase !== "waiting" && roundNumber !== null && roundNumber > 0 && (
                 <div className="px-4 py-1.5 rounded-full bg-white/5 border border-white/10 flex items-center gap-2 shadow-inner">
                     <span className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
                     <span className="text-sm font-semibold tracking-wide text-zinc-200">
@@ -367,7 +542,38 @@ export default function RoomPage() {
                     <p className="text-zinc-400 text-lg">Waiting for the host to initialize the sequence.</p>
                 </div>
 
-                {/* 📋 NEW: LOBBY ROOM CODE BAR */}
+                {/* --- 1 TO 10 ROUND SELECTOR --- */}
+                <div className="animate-in fade-in slide-in-from-bottom-2 duration-700 delay-100">
+                    {isHost ? (
+                        <div className="flex flex-col items-center gap-2">
+                             <div className="flex items-center gap-2 text-[10px] uppercase font-bold text-zinc-500 tracking-wider">
+                                <Settings2 size={12} /> Match Length (Rounds)
+                             </div>
+                             <div className="flex flex-wrap justify-center gap-1.5 bg-[#121214] border border-white/10 p-2 rounded-xl shadow-lg max-w-[320px]">
+                                {Array.from({ length: 10 }, (_, i) => i + 1).map(num => (
+                                    <button
+                                        key={num}
+                                        onClick={() => handleUpdateRounds(num)}
+                                        className={cn(
+                                            "w-9 h-9 rounded-lg text-sm font-bold transition-all border border-transparent",
+                                            totalRounds === num 
+                                              ? "bg-zinc-700 text-white shadow-inner border-white/10 scale-105" 
+                                              : "text-zinc-600 hover:text-zinc-300 hover:bg-white/5"
+                                        )}
+                                    >
+                                        {num}
+                                    </button>
+                                ))}
+                             </div>
+                        </div>
+                    ) : (
+                        <div className="px-4 py-2 bg-[#121214] border border-white/10 rounded-full text-zinc-500 text-sm font-medium">
+                            Match Length: <span className="text-orange-500 font-bold">{totalRounds} Rounds</span>
+                        </div>
+                    )}
+                </div>
+
+                {/* LOBBY ROOM CODE */}
                 <div 
                     className="relative group cursor-pointer animate-in zoom-in-50 fade-in duration-500 slide-in-from-bottom-2"
                     onClick={handleCopy}
@@ -381,7 +587,6 @@ export default function RoomPage() {
                             {copied ? <Check size={18} /> : <Copy size={18} />}
                         </div>
                     </div>
-                    {/* Tiny feedback below */}
                     {copied && (
                         <div className="absolute -bottom-8 left-1/2 -translate-x-1/2 text-xs text-green-500 font-mono animate-in fade-in slide-in-from-top-1 whitespace-nowrap">
                             Copied to clipboard!
@@ -549,7 +754,22 @@ export default function RoomPage() {
                         ))}
                     </div>
                 )}
-                <Button variant="outline" onClick={() => router.push("/")} className="h-12 px-8 rounded-full border-zinc-700 bg-transparent hover:bg-zinc-800 text-zinc-300 transition-all hover:scale-105">Return to Lobby</Button>
+                <Button
+                  variant="outline"
+                  className="h-12 px-8 rounded-full border-zinc-700 bg-transparent hover:bg-zinc-800 text-zinc-300 transition-all hover:scale-105"
+                  onClick={async () => {
+                    if (isHost) {
+                      await fetch("/api/room/reset", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ room_id: roomId }),
+                      });
+                    }
+                    window.location.reload(); 
+                  }}
+                >
+                  {isHost ? "Play Again" : "Return to Lobby"}
+                </Button>
             </div>
         )}
 
@@ -557,7 +777,7 @@ export default function RoomPage() {
 
       {/* --- OVERLAYS --- */}
       
-      {/* 🔔 NEW: HOST POPUP (Room Code Copied) */}
+      {/* 🔔 HOST POPUP */}
       <AnimatePresence>
         {showHostPopup && (
             <motion.div 

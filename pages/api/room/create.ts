@@ -46,7 +46,7 @@ export default async function handler(
         host_id: user_id,
         current_round: 1,
         total_rounds: rounds, // 👈 IMPORTANT LINE
-        created_at: now,
+        started_at: now,
       })
       .select()
       .single();
