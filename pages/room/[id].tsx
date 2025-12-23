@@ -82,7 +82,7 @@ export default function RoomPage() {
 
   // Refs
   const promptTextRef = useRef(promptText);
-  
+  const hasScoredRound = useRef<string | null>(null);
   useEffect(() => {
     promptTextRef.current = promptText;
   }, [promptText]);
@@ -298,14 +298,23 @@ export default function RoomPage() {
     });
   };
 
-  const triggerScoring = useCallback(() => {
+const triggerScoring = useCallback(() => {
     if (!isHost) return;
+    
+    // 🛑 GUARD: If we already scored this round ID, stop immediately.
+    if (hasScoredRound.current === currentRoundId) return;
+
+    // ✅ MARK: Set the flag so next attempts fail
+    hasScoredRound.current = currentRoundId;
+
+    console.log("Triggering Scoring for:", currentRoundId); // Debug log
+
     fetch("/api/battle/score-prompts", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ room_id: roomId, round_id: currentRoundId, image_url: imageURL }),
     }).catch(() => setLoadingEval(false));
-  }, [roomId, currentRoundId, imageURL, isHost]);
+}, [roomId, currentRoundId, imageURL, isHost]);
 
   const handleSubmit = async () => {
     setSubmitted(true);
@@ -475,6 +484,11 @@ export default function RoomPage() {
     const t = setTimeout(() => setNextRoundTimer((v) => (v ? v - 1 : null)), 1000);
     return () => clearTimeout(t);
   }, [nextRoundTimer, handleNextRound, isHost]);
+
+  useEffect(() => {
+    if (currentRoundId !== hasScoredRound.current) {
+    }
+}, [currentRoundId]);
 
   /* ---------------- UI RENDER ---------------- */
 
