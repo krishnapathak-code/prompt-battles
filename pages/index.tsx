@@ -1,11 +1,14 @@
 ﻿"use client";
 
 import { useRouter } from "next/router";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react"; // Added useRef
 import { Button } from "@/components/ui/button";
 import { supabase } from "@/lib/supabase";
-import { motion } from "framer-motion";
-import { Plus, Users, Swords, Zap, Loader2 } from "lucide-react"; // Added Loader2
+import { motion, AnimatePresence } from "framer-motion"; // Added AnimatePresence
+import { 
+  Plus, Users, Swords, Zap, Loader2, 
+  Menu, User, Settings, History, LogOut, X // Added new icons
+} from "lucide-react";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 
@@ -19,6 +22,7 @@ const noiseBg = `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='htt
 export default function Home() {
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(true);
+  const [isMenuOpen, setIsMenuOpen] = useState(false); // New State for Menu
 
   /* ---------------- AUTH PROTECTION ---------------- */
   useEffect(() => {
@@ -26,16 +30,20 @@ export default function Home() {
       const { data } = await supabase.auth.getSession();
       
       if (!data.session) {
-        // If no user, kick them to the Auth page
         router.replace("/auth");
       } else {
-        // If user exists, show the dashboard
         setIsLoading(false);
       }
     };
 
     checkUser();
   }, [router]);
+
+  /* ---------------- HANDLERS ---------------- */
+  const handleLogout = async () => {
+    await supabase.auth.signOut();
+    router.push("/auth");
+  };
 
   /* ---------------- LOADING STATE ---------------- */
   if (isLoading) {
@@ -57,26 +65,79 @@ export default function Home() {
       <div className="fixed bottom-[-20%] right-[-10%] w-[60vw] h-[60vw] bg-orange-900/10 blur-[150px] rounded-full pointer-events-none animate-pulse delay-1000" />
 
       {/* NAVBAR */}
-      <header className="relative z-10 w-full px-8 py-6 flex justify-between items-center max-w-7xl mx-auto">
-        <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center shadow-lg shadow-orange-500/20">
-                <Swords className="text-white" size={20} />
+      <header className="relative z-50 w-full px-6 md:px-8 py-6 flex justify-between items-center max-w-7xl mx-auto">
+        
+        {/* LEFT SECTION: MENU + LOGO */}
+        <div className="flex items-center gap-4 md:gap-6">
+            
+            {/* MENU DROPDOWN */}
+            <div className="relative">
+                <Button 
+                    variant="ghost" 
+                    size="icon"
+                    onClick={() => setIsMenuOpen(!isMenuOpen)}
+                    className="relative z-50 text-zinc-400 hover:text-white hover:bg-white/10 rounded-full"
+                >
+                    {isMenuOpen ? <X size={24} /> : <Menu size={24} />}
+                </Button>
+
+                {/* ANIMATED DROPDOWN */}
+                <AnimatePresence>
+                    {isMenuOpen && (
+                        <>
+                            {/* Invisible Backdrop to close on click outside */}
+                            <div 
+                                className="fixed inset-0 z-30" 
+                                onClick={() => setIsMenuOpen(false)} 
+                            />
+                            
+                            {/* Dropdown Content */}
+                            <motion.div
+                                initial={{ opacity: 0, y: -10, scale: 0.95 }}
+                                animate={{ opacity: 1, y: 0, scale: 1 }}
+                                exit={{ opacity: 0, y: -10, scale: 0.95 }}
+                                transition={{ duration: 0.2 }}
+                                className="absolute top-12 left-0 w-56 bg-[#09090b]/90 backdrop-blur-xl border border-white/10 rounded-2xl shadow-2xl shadow-black/50 overflow-hidden z-40 p-2"
+                            >
+                                <div className="space-y-1">
+                                    <MenuItem icon={<User size={18}/>} label="Profile" onClick={() => router.push('/profile')} />
+                                    <MenuItem icon={<History size={18}/>} label="Battle History" onClick={() => router.push('/history')} />
+                                    <MenuItem icon={<Settings size={18}/>} label="Settings" onClick={() => router.push('/settings')} />
+                                    
+                                    <div className="h-px bg-white/10 my-2 mx-2" />
+                                    
+                                    <MenuItem 
+                                        icon={<LogOut size={18}/>} 
+                                        label="Sign Out" 
+                                        onClick={handleLogout}
+                                        className="text-red-400 hover:bg-red-500/10 hover:text-red-300"
+                                    />
+                                </div>
+                            </motion.div>
+                        </>
+                    )}
+                </AnimatePresence>
             </div>
-            <span className="font-bold text-xl tracking-tight">Prompt<span className="text-zinc-500">Wars</span></span>
+
+            {/* LOGO */}
+            <div className="flex items-center gap-3 select-none">
+                <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-orange-500 to-red-600 flex items-center justify-center shadow-lg shadow-orange-500/20">
+                    <Swords className="text-white" size={20} />
+                </div>
+                <span className="font-bold text-xl tracking-tight hidden sm:block">Prompt<span className="text-zinc-500">Wars</span></span>
+            </div>
         </div>
         
+        {/* RIGHT SECTION: BETA & ACTION */}
         <div className="flex items-center gap-4">
-             <div className="px-4 py-2 rounded-full bg-white/5 border border-white/5 text-sm font-medium text-zinc-400">
+             <div className="hidden md:block px-4 py-2 rounded-full bg-white/5 border border-white/5 text-sm font-medium text-zinc-400">
                 Beta v1.0
             </div>
-            {/* Logout Button */}
+            {/* Quick Sign Out (Can remove if redundant, but good for UX) */}
             <Button 
                 variant="ghost" 
-                className="text-zinc-400 hover:text-white"
-                onClick={async () => {
-                    await supabase.auth.signOut();
-                    router.push("/auth");
-                }}
+                className="hidden md:flex text-zinc-400 hover:text-white"
+                onClick={handleLogout}
             >
                 Sign Out
             </Button>
@@ -108,7 +169,6 @@ export default function Home() {
 
         {/* ACTION CARDS */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 w-full max-w-4xl">
-            
             {/* CARD 1: CREATE ROOM */}
             <motion.div 
                 initial={{ opacity: 0, x: -20 }}
@@ -184,7 +244,23 @@ export default function Home() {
   );
 }
 
-// Simple helper icon
+// ---------------- SUB-COMPONENTS ---------------- //
+
+function MenuItem({ icon, label, onClick, className }: { icon: React.ReactNode, label: string, onClick: () => void, className?: string }) {
+    return (
+        <button 
+            onClick={onClick}
+            className={cn(
+                "w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium text-zinc-300 hover:text-white hover:bg-white/5 transition-colors text-left",
+                className
+            )}
+        >
+            {icon}
+            {label}
+        </button>
+    )
+}
+
 const ArrowIcon = () => (
     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
         <path d="M5 12h14" />
