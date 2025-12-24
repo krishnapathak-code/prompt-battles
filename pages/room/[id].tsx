@@ -21,8 +21,8 @@ type Player = {
   user_id: string;
   is_host?: boolean;
   is_ready?: boolean;
-  users?: { name: string } | null;
-  player_scores?: { total_score: number } | null;
+  users?: { name: string }[] | null;
+  player_scores?: { total_score: number } [] | null;
 };
 
 type PromptResult = {
@@ -31,7 +31,7 @@ type PromptResult = {
   scores?: number;
   justification?: string;
   user_id: string;
-  users?: { name: string } | null;
+  users?: { name: string }[] | null;
 };
 
 type BattlePhase = "waiting" | "submission" | "results" | "finished";
@@ -216,7 +216,7 @@ export default function RoomPage() {
                           .select(`id, prompt_text, scores, justification, user_id, users(name)`)
                           .eq("round_id", roundData.id)
                           .order("scores", { ascending: false });
-                     setResults(resultData as PromptResult[] || []);
+                     setResults(resultData||[]);
                  } else {
                      setBattlePhase("submission");
                      setLoadingEval(true);
