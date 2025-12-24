@@ -17,12 +17,13 @@ function cn(...inputs: ClassValue[]) {
 const noiseBg = `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E")`;
 
 /* ---------------- TYPES ---------------- */
+// Fixed types to handle single objects usually returned by Supabase joins
 type Player = {
   user_id: string;
   is_host?: boolean;
   is_ready?: boolean;
-  users?: { name: string }[] | null;
-  player_scores?: { total_score: number } [] | null;
+  users?: { name: string } | null;
+  player_scores?: { total_score: number } | null;
 };
 
 type PromptResult = {
@@ -31,7 +32,7 @@ type PromptResult = {
   scores?: number;
   justification?: string;
   user_id: string;
-  users?: { name: string }[] | null;
+  users?: { name: string } | null;
 };
 
 type BattlePhase = "waiting" | "submission" | "results" | "finished";
@@ -44,13 +45,10 @@ export default function RoomPage() {
   const roomId = typeof id === "string" ? id : null;
 
   /* --- STATE --- */
-  // Loading State (The Robust Fix)
   const [isRestoring, setIsRestoring] = useState(true);
-
   const [players, setPlayers] = useState<Player[]>([]);
   const [battlePhase, setBattlePhase] = useState<BattlePhase>("waiting");
   
-  // Game Data
   const [timeLeft, setTimeLeft] = useState(60);
   const [imageURL, setImageURL] = useState<string | null>(null);
   const [promptText, setPromptText] = useState("");
@@ -59,30 +57,24 @@ export default function RoomPage() {
   const [currentRoundId, setCurrentRoundId] = useState<string | null>(null);
   const [activeRoundId, setActiveRoundId] = useState<string | null>(null);
   
-  // UI State
   const [isStarting, setIsStarting] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
   const [loadingEval, setLoadingEval] = useState(false);
   
-  // Battle State
   const [battleId, setBattleId] = useState<string | null>(null);
   const [roundNumber, setRoundNumber] = useState<number | null>(null);
   const [totalRounds, setTotalRounds] = useState<number>(3);
   
   const [isTransitioning, setIsTransitioning] = useState(false);
-  
-  // Copy/Clipboard State
   const [copied, setCopied] = useState(false);
   const [showHostPopup, setShowHostPopup] = useState(false);
-  const hasShownPopupRef = useRef(false);
 
-  // Timers
   const [timerRoundId, setTimerRoundId] = useState<string | null>(null);
   const [nextRoundTimer, setNextRoundTimer] = useState<number | null>(null);
 
-  // Refs
   const promptTextRef = useRef(promptText);
   const hasScoredRound = useRef<string | null>(null);
+
   useEffect(() => {
     promptTextRef.current = promptText;
   }, [promptText]);
@@ -92,7 +84,7 @@ export default function RoomPage() {
     supabase.auth.getUser().then(({ data }) => setUserId(data.user?.id || null));
   }, []);
 
-/* ---------------- HYDRATION (FINAL PRODUCTION FIX) ---------------- */
+/* ---------------- HYDRATION ---------------- */
   useEffect(() => {
     if (!roomId || !userId) return;
 
@@ -100,7 +92,6 @@ export default function RoomPage() {
       setIsRestoring(true); 
 
       try {
-        // STEP 1: Fetch Room Info
         const { data: roomData, error: roomError } = await supabase
             .from("rooms")
             .select("total_rounds")
@@ -109,18 +100,15 @@ export default function RoomPage() {
 
         if (roomError) throw roomError;
 
-        // STEP 2: Fetch Battles (Safe Select *)
         const { data: allBattles } = await supabase
             .from("battles")
             .select("*") 
             .eq("room_id", roomId);
 
-        // Priority: Active -> Finished -> Any
         let latestBattle = allBattles?.find(b => b.status === 'active');
         if (!latestBattle) latestBattle = allBattles?.find(b => b.status === 'finished');
         if (!latestBattle && allBattles && allBattles.length > 0) latestBattle = allBattles[0];
 
-        // STEP 3: Handle Missing Battle
         if (!latestBattle || latestBattle.status === 'waiting') {
             setTotalRounds(roomData.total_rounds);
             setBattlePhase("waiting");
@@ -128,7 +116,6 @@ export default function RoomPage() {
             return;
         }
 
-        // STEP 4: Restore Battle State
         setBattleId(latestBattle.id);
         setRoundNumber(latestBattle.current_round);
         setTotalRounds(latestBattle.total_rounds || roomData.total_rounds);
@@ -139,19 +126,15 @@ export default function RoomPage() {
             return;
         }
 
-        // STEP 5: Restore Active Round
         if (latestBattle.status === 'active') {
-            
-            // 1. Fetch Round Data (Using maybeSingle to prevent 406 crash)
             const { data: roundData, error: roundError } = await supabase
                 .from("rounds")
-                .select("*") // Fetch all columns to be safe
+                .select("*")
                 .eq("battle_id", latestBattle.id)
                 .eq("round_number", latestBattle.current_round)
                 .maybeSingle();
 
             if (roundError || !roundData) {
-                console.error("❌ Round fetch failed:", roundError);
                 setIsRestoring(false);
                 return;
             }
@@ -159,8 +142,6 @@ export default function RoomPage() {
             setCurrentRoundId(roundData.id);
             setActiveRoundId(roundData.id);
 
-            // 2. Fetch Image (Using confirmed 'image_id' column)
-            // We use 'maybeSingle' so if the image is missing/blocked, it doesn't crash the app
             if (roundData.image_id) {
                  const { data: imageData } = await supabase
                     .from("images")
@@ -171,24 +152,18 @@ export default function RoomPage() {
                  if (imageData) setImageURL(imageData.url);
             }
 
-            // 3. Calculate Time (With Fallback)
             let calculatedTimeLeft = 60;
-            
-            // Try 'started_at', fallback to 'created_at' if started_at is null
-            const startTime = roundData.started_at || roundData.started_at;
+            const startTime = roundData.started_at || roundData.created_at;
             
             if (startTime) {
                 const roundStartTime = new Date(startTime).getTime();
                 const now = Date.now();
                 const elapsed = Math.floor((now - roundStartTime) / 1000);
                 calculatedTimeLeft = Math.max(0, 60 - elapsed);
-            } else {
-                console.warn("⚠️ Data Issue: Both 'started_at' and 'created_at' are null in DB.");
             }
             
             setTimeLeft(calculatedTimeLeft);
 
-            // 4. Check User Submission
             const { data: userPrompt } = await supabase
                 .from("prompts")
                 .select("prompt_text")
@@ -201,7 +176,6 @@ export default function RoomPage() {
                 setSubmitted(true);
             }
 
-            // 5. Determine Phase
             if (calculatedTimeLeft === 0) {
                  const { count } = await supabase
                     .from("prompts")
@@ -216,7 +190,7 @@ export default function RoomPage() {
                           .select(`id, prompt_text, scores, justification, user_id, users(name)`)
                           .eq("round_id", roundData.id)
                           .order("scores", { ascending: false });
-                     setResults(resultData||[]);
+                     setResults((resultData as unknown as PromptResult[]) || []);
                  } else {
                      setBattlePhase("submission");
                      setLoadingEval(true);
@@ -245,7 +219,7 @@ export default function RoomPage() {
       .from("room_players")
       .select(`user_id, is_host, is_ready, users(name), player_scores(total_score)`)
       .eq("room_id", roomId);
-    setPlayers((data as Player[]) || []);
+    setPlayers((data as unknown as Player[]) || []);
   }, [roomId, userId]);
 
   /* ---------------- HANDLERS ---------------- */
@@ -300,14 +274,8 @@ export default function RoomPage() {
 
 const triggerScoring = useCallback(() => {
     if (!isHost) return;
-    
-    // 🛑 GUARD: If we already scored this round ID, stop immediately.
     if (hasScoredRound.current === currentRoundId) return;
-
-    // ✅ MARK: Set the flag so next attempts fail
     hasScoredRound.current = currentRoundId;
-
-    console.log("Triggering Scoring for:", currentRoundId); // Debug log
 
     fetch("/api/battle/score-prompts", {
       method: "POST",
@@ -367,7 +335,6 @@ const triggerScoring = useCallback(() => {
 
   /* ---------------- EFFECTS & REALTIME ---------------- */
   
-  // Realtime Listeners
   useEffect(() => {
     if (!roomId || !userId) return;
     loadPlayers();
@@ -411,7 +378,6 @@ const triggerScoring = useCallback(() => {
         setLoadingEval(false);
       })
 
-      /* ---- RESULTS READY ---- */
       .on("broadcast", { event: "results_ready" }, async (payload) => {
         setLoadingEval(false);
         if (activeRoundId && payload.payload.round_id !== activeRoundId) return;
@@ -424,7 +390,7 @@ const triggerScoring = useCallback(() => {
           .eq("round_id", payload.payload.round_id)
           .order("scores", { ascending: false });
           
-        setResults((data as PromptResult[]) || []);
+        setResults((data as unknown as PromptResult[]) || []);
         setBattlePhase("results");
         
         if (roundNumber && roundNumber < totalRounds) {
@@ -485,14 +451,8 @@ const triggerScoring = useCallback(() => {
     return () => clearTimeout(t);
   }, [nextRoundTimer, handleNextRound, isHost]);
 
-  useEffect(() => {
-    if (currentRoundId !== hasScoredRound.current) {
-    }
-}, [currentRoundId]);
-
   /* ---------------- UI RENDER ---------------- */
 
-  // 1. BLOCK RENDER UNTIL STATE IS RESTORED
   if (isRestoring) {
     return (
         <div className="min-h-screen bg-[#09090b] flex items-center justify-center">
@@ -541,7 +501,9 @@ const triggerScoring = useCallback(() => {
            <div className="h-8 w-[1px] bg-white/10 mx-2 hidden lg:block" />
            <div className="flex items-center -space-x-2">
              {players.slice(0, 3).map(p => (
-                 <div key={p.user_id} className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">{p.users?.[0]?.name?.[0]}</div>
+                 <div key={p.user_id} className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">
+                    {p.users?.name?.[0] || "?"}
+                 </div>
              ))}
              {players.length > 3 && <div className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">+{players.length - 3}</div>}
            </div>
@@ -559,7 +521,6 @@ const triggerScoring = useCallback(() => {
                     <p className="text-zinc-400 text-lg">Waiting for the host to initialize the sequence.</p>
                 </div>
 
-                {/* --- 1 TO 10 ROUND SELECTOR --- */}
                 <div className="animate-in fade-in slide-in-from-bottom-2 duration-700 delay-100">
                     {isHost ? (
                         <div className="flex flex-col items-center gap-2">
@@ -590,11 +551,7 @@ const triggerScoring = useCallback(() => {
                     )}
                 </div>
 
-                {/* LOBBY ROOM CODE */}
-                <div 
-                    className="relative group cursor-pointer animate-in zoom-in-50 fade-in duration-500 slide-in-from-bottom-2"
-                    onClick={handleCopy}
-                >
+                <div className="relative group cursor-pointer animate-in zoom-in-50 fade-in duration-500 slide-in-from-bottom-2" onClick={handleCopy}>
                     <div className="flex items-center gap-4 bg-[#121214] border border-white/10 rounded-full pl-6 pr-2 py-2 shadow-2xl hover:border-orange-500/50 hover:bg-white/5 transition-all">
                         <div className="flex flex-col items-start">
                             <span className="text-[10px] uppercase font-bold text-zinc-500 tracking-wider">Room Code</span>
@@ -615,7 +572,7 @@ const triggerScoring = useCallback(() => {
                     {players.map(p => (
                         <div key={p.user_id} className={cn("px-4 py-2 rounded-lg border flex items-center gap-2 transition-all", p.is_ready ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-zinc-900 border-zinc-800 text-zinc-500")}>
                             <span className={cn("w-2 h-2 rounded-full", p.is_ready ? "bg-emerald-500" : "bg-zinc-600")} />
-                            {p.users?.[0]?.name?.[0]} {p.is_host && "👑"}
+                            {p.users?.name || "Anonymous"} {p.is_host && "👑"}
                         </div>
                     ))}
                 </div>
@@ -694,8 +651,13 @@ const triggerScoring = useCallback(() => {
                             <div key={r.id} className={cn("p-4 rounded-xl flex items-center gap-4 transition-all", i === 0 ? "bg-gradient-to-r from-orange-500/10 to-red-500/10 border border-orange-500/20" : "bg-[#121214] border border-white/5")}>
                                 <div className={cn("w-8 h-8 rounded flex items-center justify-center font-bold text-sm", i === 0 ? "bg-orange-500 text-white" : "bg-zinc-800 text-zinc-500")}>{i + 1}</div>
                                 <div className="flex-1">
-                                    <div className="flex justify-between"><span className={cn("font-medium", i === 0 ? "text-orange-200" : "text-zinc-300")}>{r.users?.name}</span><span className="font-mono font-bold">{r.scores}</span></div>
-                                    <div className="h-1 w-full bg-zinc-800 rounded-full mt-2 overflow-hidden"><div className={cn("h-full rounded-full", i === 0 ? "bg-orange-500" : "bg-zinc-600")} style={{ width: `${(r.scores || 0)}%` }} /></div>
+                                    <div className="flex justify-between">
+                                        <span className={cn("font-medium", i === 0 ? "text-orange-200" : "text-zinc-300")}>{r.users?.name || "Anonymous"}</span>
+                                        <span className="font-mono font-bold">{r.scores}</span>
+                                    </div>
+                                    <div className="h-1 w-full bg-zinc-800 rounded-full mt-2 overflow-hidden">
+                                        <div className={cn("h-full rounded-full", i === 0 ? "bg-orange-500" : "bg-zinc-600")} style={{ width: `${(r.scores || 0)}%` }} />
+                                    </div>
                                 </div>
                             </div>
                         ))}
@@ -734,31 +696,60 @@ const triggerScoring = useCallback(() => {
                 </div>
                 <div className="flex items-end justify-center gap-4 lg:gap-8 w-full max-w-4xl mb-12 px-4 h-[400px]">
                     {players.length > 1 && (() => {
-                        const p2 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[1];
+                        const sorted = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0));
+                        const p2 = sorted[1];
+                        if (!p2) return null;
                         return (
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "60%", opacity: 1 }} transition={{ delay: 0.5, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[200px]">
-                                <div className="mb-4 flex flex-col items-center gap-2"><div className="w-16 h-16 rounded-full border-2 border-zinc-500 bg-zinc-800 flex items-center justify-center text-xl font-bold text-zinc-300 shadow-xl">{p2.users?.name?.[0]}</div><span className="text-zinc-400 font-bold truncate max-w-full">{p2.users?.name}</span></div>
-                                <div className="w-full h-full bg-gradient-to-t from-zinc-800 to-zinc-600 rounded-t-lg border-t border-zinc-500 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(255,255,255,0.05)]"><span className="text-4xl font-black text-zinc-400/20 absolute top-2">2</span><span className="text-2xl font-bold text-white">{p2.player_scores?.total_score}</span></div>
+                                <div className="mb-4 flex flex-col items-center gap-2">
+                                    <div className="w-16 h-16 rounded-full border-2 border-zinc-500 bg-zinc-800 flex items-center justify-center text-xl font-bold text-zinc-300 shadow-xl">
+                                        {p2.users?.name?.[0] || "?"}
+                                    </div>
+                                    <span className="text-zinc-400 font-bold truncate max-w-full">{p2.users?.name || "Player 2"}</span>
+                                </div>
+                                <div className="w-full h-full bg-gradient-to-t from-zinc-800 to-zinc-600 rounded-t-lg border-t border-zinc-500 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(255,255,255,0.05)]">
+                                    <span className="text-4xl font-black text-zinc-400/20 absolute top-2">2</span>
+                                    <span className="text-2xl font-bold text-white">{p2.player_scores?.total_score || 0}</span>
+                                </div>
                             </motion.div>
                         )
                     })()}
 
                     {(() => {
                         const p1 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[0];
+                        if (!p1) return null;
                         return (
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "80%", opacity: 1 }} transition={{ delay: 0.8, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[220px] z-10">
-                                <div className="mb-4 flex flex-col items-center gap-2 relative"><div className="absolute -top-10 text-5xl animate-bounce">👑</div><div className="w-24 h-24 rounded-full border-4 border-yellow-400 bg-zinc-800 flex items-center justify-center text-3xl font-bold text-white shadow-[0_0_30px_rgba(250,204,21,0.4)]">{p1?.users?.name?.[0]}</div><span className="text-yellow-400 font-bold text-xl truncate max-w-full">{p1?.users?.name}</span></div>
-                                <div className="w-full h-full bg-gradient-to-t from-orange-600 via-yellow-500 to-yellow-300 rounded-t-xl border-t border-yellow-200 relative flex items-end justify-center pb-6 shadow-[0_0_50px_rgba(234,179,8,0.3)]"><span className="text-6xl font-black text-white/30 absolute top-4">1</span><span className="text-4xl font-black text-black">{p1?.player_scores?.total_score}</span></div>
+                                <div className="mb-4 flex flex-col items-center gap-2 relative">
+                                    <div className="absolute -top-10 text-5xl animate-bounce">👑</div>
+                                    <div className="w-24 h-24 rounded-full border-4 border-yellow-400 bg-zinc-800 flex items-center justify-center text-3xl font-bold text-white shadow-[0_0_30px_rgba(250,204,21,0.4)]">
+                                        {p1.users?.name?.[0] || "?"}
+                                    </div>
+                                    <span className="text-yellow-400 font-bold text-xl truncate max-w-full">{p1.users?.name || "Champion"}</span>
+                                </div>
+                                <div className="w-full h-full bg-gradient-to-t from-orange-600 via-yellow-500 to-yellow-300 rounded-t-xl border-t border-yellow-200 relative flex items-end justify-center pb-6 shadow-[0_0_50px_rgba(234,179,8,0.3)]">
+                                    <span className="text-6xl font-black text-white/30 absolute top-4">1</span>
+                                    <span className="text-4xl font-black text-black">{p1.player_scores?.total_score || 0}</span>
+                                </div>
                             </motion.div>
                         )
                     })()}
 
                     {players.length > 2 && (() => {
                         const p3 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[2];
+                        if (!p3) return null;
                         return (
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "45%", opacity: 1 }} transition={{ delay: 0.2, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[200px]">
-                                <div className="mb-4 flex flex-col items-center gap-2"><div className="w-16 h-16 rounded-full border-2 border-orange-800 bg-zinc-800 flex items-center justify-center text-xl font-bold text-orange-700 shadow-xl">{p3.users?.name?.[0]}</div><span className="text-orange-800/80 font-bold truncate max-w-full">{p3.users?.name}</span></div>
-                                <div className="w-full h-full bg-gradient-to-t from-orange-900 to-orange-700 rounded-t-lg border-t border-orange-600 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(194,65,12,0.1)]"><span className="text-4xl font-black text-black/20 absolute top-2">3</span><span className="text-2xl font-bold text-orange-100">{p3.player_scores?.total_score}</span></div>
+                                <div className="mb-4 flex flex-col items-center gap-2">
+                                    <div className="w-16 h-16 rounded-full border-2 border-orange-800 bg-zinc-800 flex items-center justify-center text-xl font-bold text-orange-700 shadow-xl">
+                                        {p3.users?.name?.[0] || "?"}
+                                    </div>
+                                    <span className="text-orange-800/80 font-bold truncate max-w-full">{p3.users?.name || "Player 3"}</span>
+                                </div>
+                                <div className="w-full h-full bg-gradient-to-t from-orange-900 to-orange-700 rounded-t-lg border-t border-orange-600 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(194,65,12,0.1)]">
+                                    <span className="text-4xl font-black text-black/20 absolute top-2">3</span>
+                                    <span className="text-2xl font-bold text-orange-100">{p3.player_scores?.total_score || 0}</span>
+                                </div>
                             </motion.div>
                         )
                     })()}
@@ -767,7 +758,13 @@ const triggerScoring = useCallback(() => {
                     <div className="w-full max-w-md bg-white/5 rounded-xl border border-white/5 p-4 mb-8 max-h-40 overflow-y-auto">
                         <h3 className="text-xs uppercase text-zinc-500 font-bold mb-3 tracking-wider">Honorable Mentions</h3>
                         {[...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0)).slice(3).map((p, i) => (
-                                <div key={p.user_id} className="flex justify-between items-center py-2 border-b border-white/5 last:border-0"><span className="text-zinc-400 flex items-center gap-3"><span className="text-xs font-mono opacity-50">#{i + 4}</span>{p.users?.name}</span><span className="text-zinc-500 font-mono">{p.player_scores?.total_score}</span></div>
+                                <div key={p.user_id} className="flex justify-between items-center py-2 border-b border-white/5 last:border-0">
+                                    <span className="text-zinc-400 flex items-center gap-3">
+                                        <span className="text-xs font-mono opacity-50">#{i + 4}</span>
+                                        {p.users?.name || "Anonymous"}
+                                    </span>
+                                    <span className="text-zinc-500 font-mono">{p.player_scores?.total_score || 0}</span>
+                                </div>
                         ))}
                     </div>
                 )}
@@ -794,7 +791,6 @@ const triggerScoring = useCallback(() => {
 
       {/* --- OVERLAYS --- */}
       
-      {/* 🔔 HOST POPUP */}
       <AnimatePresence>
         {showHostPopup && (
             <motion.div 
@@ -815,7 +811,6 @@ const triggerScoring = useCallback(() => {
         )}
       </AnimatePresence>
 
-      {/* Loading Overlay */}
       {isTransitioning && battlePhase !== 'finished' && (
         <div className="fixed inset-0 z-[100] bg-black/90 backdrop-blur-md flex items-center justify-center">
             <div className="flex flex-col items-center gap-6">
@@ -832,7 +827,6 @@ const triggerScoring = useCallback(() => {
         </div>
       )}
 
-      {/* Scoring Overlay */}
       {loadingEval && (
         <div className="fixed inset-0 z-[100] bg-black/60 backdrop-blur-md flex items-center justify-center">
             <div className="bg-[#121214] border border-white/10 p-8 rounded-2xl shadow-2xl max-w-sm text-center">
