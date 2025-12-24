@@ -615,7 +615,7 @@ const triggerScoring = useCallback(() => {
                     {players.map(p => (
                         <div key={p.user_id} className={cn("px-4 py-2 rounded-lg border flex items-center gap-2 transition-all", p.is_ready ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-zinc-900 border-zinc-800 text-zinc-500")}>
                             <span className={cn("w-2 h-2 rounded-full", p.is_ready ? "bg-emerald-500" : "bg-zinc-600")} />
-                            {p.users?.name} {p.is_host && "👑"}
+                            {p.users?.[0]?.name?.[0]} {p.is_host && "👑"}
                         </div>
                     ))}
                 </div>
