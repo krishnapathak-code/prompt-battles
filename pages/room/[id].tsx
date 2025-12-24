@@ -541,7 +541,7 @@ const triggerScoring = useCallback(() => {
            <div className="h-8 w-[1px] bg-white/10 mx-2 hidden lg:block" />
            <div className="flex items-center -space-x-2">
              {players.slice(0, 3).map(p => (
-                 <div key={p.user_id} className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">{p.users?.name?.[0]}</div>
+                 <div key={p.user_id} className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">{p.users?.[0]?.name?.[0]}</div>
              ))}
              {players.length > 3 && <div className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">+{players.length - 3}</div>}
            </div>
