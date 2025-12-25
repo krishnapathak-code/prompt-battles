@@ -74,7 +74,6 @@ export default function RoomPage() {
 
   const promptTextRef = useRef(promptText);
   const hasScoredRound = useRef<string | null>(null);
-
   useEffect(() => {
     promptTextRef.current = promptText;
   }, [promptText]);
@@ -274,8 +273,14 @@ export default function RoomPage() {
 
 const triggerScoring = useCallback(() => {
     if (!isHost) return;
+    
+    // 🛑 GUARD: If we already scored this round ID, stop immediately.
     if (hasScoredRound.current === currentRoundId) return;
+
+    // ✅ MARK: Set the flag so next attempts fail
     hasScoredRound.current = currentRoundId;
+
+    console.log("Triggering Scoring for:", currentRoundId); // Debug log
 
     fetch("/api/battle/score-prompts", {
       method: "POST",
@@ -450,6 +455,11 @@ const triggerScoring = useCallback(() => {
     const t = setTimeout(() => setNextRoundTimer((v) => (v ? v - 1 : null)), 1000);
     return () => clearTimeout(t);
   }, [nextRoundTimer, handleNextRound, isHost]);
+
+  useEffect(() => {
+    if (currentRoundId !== hasScoredRound.current) {
+    }
+}, [currentRoundId]);
 
   /* ---------------- UI RENDER ---------------- */
 

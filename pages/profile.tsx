@@ -103,7 +103,7 @@ export default function Profile() {
   // Modal State
   const [selectedBattleId, setSelectedBattleId] = useState<string | null>(null);
 
-  /* ---------------- DATA FETCHING ---------------- */
+ /* ---------------- DATA FETCHING ---------------- */
   const fetchData = async (sessionUser: any) => {
     try {
       const userId = sessionUser.id;
@@ -128,7 +128,7 @@ export default function Profile() {
         setEditName(dbUser.name || "Unknown Warrior");
       }
 
-      // 3. Fetch Battle Stats
+      // 3. Fetch Battle Stats (SAFE FETCH & SORT)
       const { data: battleData, error: battleError } = await supabase
         .from('battle_scores')
         .select(`
@@ -143,9 +143,9 @@ export default function Profile() {
             )
         `)
         .eq('user_id', userId)
-        .limit(10);
+        .limit(50); // Fetch recent 50 to ensure we have the latest
 
-      if (battleError) throw battleData;
+      if (battleError) throw battleError;
 
       let enrichedHistory: BattleStat[] = [];
 
@@ -161,18 +161,23 @@ export default function Profile() {
             };
         });
 
+        // 🛑 SORTING HAPPENS HERE (JavaScript) 🛑
         enrichedHistory.sort((a: any, b: any) => 
             new Date(b.battles?.started_at || 0).getTime() - new Date(a.battles?.started_at || 0).getTime()
         );
+        
+        // Take only the top 10 most recent
+        enrichedHistory = enrichedHistory.slice(0, 10);
       }
 
       setHistory(enrichedHistory);
 
-      // 6. Calculate Aggregates
+      // 4. Calculate Aggregates
       const { count: totalPlayed } = await supabase.from('battle_scores').select('*', { count: 'exact', head: true }).eq('user_id', userId);
       const { count: totalWins } = await supabase.from('battle_scores').select('*', { count: 'exact', head: true }).eq('user_id', userId).eq('rank', 1);
 
       if (battleData) {
+        // Calculate average from the 50 fetched (better sample size)
         const totalScoreSum = battleData.reduce((acc, curr) => acc + (curr.total_score || 0), 0);
         const avg = battleData.length > 0 ? Math.round(totalScoreSum / battleData.length) : 0;
         
