@@ -7,7 +7,7 @@ import { supabase } from "@/lib/supabase";
 import { motion, AnimatePresence } from "framer-motion";
 import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
-import { Copy, Check, ClipboardCheck, Settings2, Loader2 } from "lucide-react";
+import { Copy, Check, ClipboardCheck, Settings2, Loader2, TrendingUp, TrendingDown, Minus } from "lucide-react";
 
 /* ---------------- UTILS ---------------- */
 function cn(...inputs: ClassValue[]) {
@@ -17,13 +17,12 @@ function cn(...inputs: ClassValue[]) {
 const noiseBg = `url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.65' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)' opacity='0.05'/%3E%3C/svg%3E")`;
 
 /* ---------------- TYPES ---------------- */
-// Fixed types to handle single objects usually returned by Supabase joins
 type Player = {
   user_id: string;
   is_host?: boolean;
   is_ready?: boolean;
-  users?: { name: string } | null;
-  player_scores?: { total_score: number } | null;
+  users?: { name: string; elo?: number } | { name: string; elo?: number }[] | null;
+  player_scores?: { total_score: number } | { total_score: number }[] | null;
 };
 
 type PromptResult = {
@@ -68,6 +67,10 @@ export default function RoomPage() {
   const [isTransitioning, setIsTransitioning] = useState(false);
   const [copied, setCopied] = useState(false);
   const [showHostPopup, setShowHostPopup] = useState(false);
+
+  // ELO State
+  const [eloChange, setEloChange] = useState<number | null>(null);
+  const [isRankedGame, setIsRankedGame] = useState(false);
 
   const [timerRoundId, setTimerRoundId] = useState<string | null>(null);
   const [nextRoundTimer, setNextRoundTimer] = useState<number | null>(null);
@@ -216,12 +219,37 @@ export default function RoomPage() {
     if (!roomId || !userId) return;
     const { data } = await supabase
       .from("room_players")
-      .select(`user_id, is_host, is_ready, users(name), player_scores(total_score)`)
+      .select(`user_id, is_host, is_ready, users(name, elo), player_scores(total_score)`)
       .eq("room_id", roomId);
     setPlayers((data as unknown as Player[]) || []);
   }, [roomId, userId]);
 
   /* ---------------- HANDLERS ---------------- */
+  
+  const getPlayerScore = (p: Player) => {
+    if (!p.player_scores) return 0;
+    if (Array.isArray(p.player_scores)) {
+      return p.player_scores[0]?.total_score || 0;
+    }
+    return (p.player_scores as { total_score: number }).total_score || 0;
+  };
+
+  const getPlayerElo = (p: Player) => {
+    if (!p.users) return 1200;
+    if (Array.isArray(p.users)) {
+      return p.users[0]?.elo || 1200;
+    }
+    return (p.users as { elo?: number }).elo || 1200;
+  };
+
+  const getPlayerName = (p: Player) => {
+    if (!p.users) return "Anonymous";
+    if (Array.isArray(p.users)) {
+      return p.users[0]?.name || "Anonymous";
+    }
+    return (p.users as { name: string }).name || "Anonymous";
+  };
+
   const me = players.find((p) => p.user_id === userId);
   const isHost = me?.is_host === true;
   const isReady = me?.is_ready === true;
@@ -273,14 +301,8 @@ export default function RoomPage() {
 
 const triggerScoring = useCallback(() => {
     if (!isHost) return;
-    
-    // 🛑 GUARD: If we already scored this round ID, stop immediately.
     if (hasScoredRound.current === currentRoundId) return;
-
-    // ✅ MARK: Set the flag so next attempts fail
     hasScoredRound.current = currentRoundId;
-
-    console.log("Triggering Scoring for:", currentRoundId); // Debug log
 
     fetch("/api/battle/score-prompts", {
       method: "POST",
@@ -381,6 +403,7 @@ const triggerScoring = useCallback(() => {
         setTimerRoundId(null);
         setRoundNumber(payload.payload.round_number);
         setLoadingEval(false);
+        setEloChange(null); // Reset delta on new round
       })
 
       .on("broadcast", { event: "results_ready" }, async (payload) => {
@@ -413,6 +436,84 @@ const triggerScoring = useCallback(() => {
         setBattlePhase("finished");
         setNextRoundTimer(null);
         setTimerRoundId(null);
+        setEloChange(null); // Reset before calc
+
+        // =========================================================
+        // ✅ ELO UPDATE, DELTA CALCULATION & SINGLE PLAYER CHECK
+        // =========================================================
+        
+        // A. Fetch FINAL scores
+        const { data: finalPlayers } = await supabase
+             .from("room_players")
+             .select(`user_id, users(elo), player_scores(total_score)`)
+             .eq("room_id", roomId);
+        
+        // B. Gatekeeper: Check for Single Player
+        if (!finalPlayers || finalPlayers.length < 2) {
+             console.log("Single player session detected. ELO update skipped.");
+             setIsRankedGame(false);
+             return; 
+        }
+
+        setIsRankedGame(true);
+
+        const myData = finalPlayers.find(p => p.user_id === userId);
+        if (!myData) return;
+
+        // C. Capture OLD ELO before update
+        let oldElo = 1200;
+        if (myData.users) {
+            if (Array.isArray(myData.users)) oldElo = myData.users[0]?.elo || 1200;
+            else oldElo = (myData.users as any).elo || 1200;
+        }
+
+        // D. Determine Rank
+        const getScore = (p: any) => {
+             const scores = p.player_scores;
+             if (Array.isArray(scores)) return scores[0]?.total_score || 0;
+             return scores?.total_score || 0;
+        };
+
+        const sorted = [...finalPlayers].sort((a,b) => getScore(b) - getScore(a));
+        const myRank = sorted.findIndex(p => p.user_id === userId); // 0 = 1st place
+        
+        // E. Determine Result
+        const isWinner = myRank === 0;
+        const result = isWinner ? 'win' : 'loss';
+        
+        const opponentIndex = isWinner ? 1 : 0;
+        const opponent = sorted[opponentIndex];
+        
+        let opponentElo = 1200;
+        if (opponent && opponent.users) {
+            if (Array.isArray(opponent.users)) {
+                opponentElo = opponent.users[0]?.elo || 1200;
+            } else {
+                opponentElo = (opponent.users as any).elo || 1200;
+            }
+        }
+
+        // F. Calculate Avg Score
+        const myTotalScore = getScore(myData);
+        const avgScore = totalRounds > 0 ? (myTotalScore / totalRounds) : 0;
+
+        // G. Trigger Update & Capture Result for UI
+        const { data: newElo } = await supabase.rpc('update_elo', {
+            p_user_id: userId,
+            p_opponent_elo: opponentElo,
+            p_result: result,
+            p_ai_score: avgScore,
+            p_wpm: 0, 
+            p_word_count: 0,
+            p_streak: isWinner ? 1 : 0
+        });
+
+        // H. Update the UI state with the difference
+        if (newElo !== null && newElo !== undefined) {
+            setEloChange(newElo - oldElo);
+        }
+        // =========================================================
+
       })
       .subscribe();
 
@@ -455,11 +556,6 @@ const triggerScoring = useCallback(() => {
     const t = setTimeout(() => setNextRoundTimer((v) => (v ? v - 1 : null)), 1000);
     return () => clearTimeout(t);
   }, [nextRoundTimer, handleNextRound, isHost]);
-
-  useEffect(() => {
-    if (currentRoundId !== hasScoredRound.current) {
-    }
-}, [currentRoundId]);
 
   /* ---------------- UI RENDER ---------------- */
 
@@ -512,7 +608,7 @@ const triggerScoring = useCallback(() => {
            <div className="flex items-center -space-x-2">
              {players.slice(0, 3).map(p => (
                  <div key={p.user_id} className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">
-                    {p.users?.name?.[0] || "?"}
+                    {getPlayerName(p)[0] || "?"}
                  </div>
              ))}
              {players.length > 3 && <div className="w-8 h-8 rounded-full border border-[#09090b] bg-zinc-800 flex items-center justify-center text-[10px] text-zinc-400">+{players.length - 3}</div>}
@@ -582,7 +678,7 @@ const triggerScoring = useCallback(() => {
                     {players.map(p => (
                         <div key={p.user_id} className={cn("px-4 py-2 rounded-lg border flex items-center gap-2 transition-all", p.is_ready ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" : "bg-zinc-900 border-zinc-800 text-zinc-500")}>
                             <span className={cn("w-2 h-2 rounded-full", p.is_ready ? "bg-emerald-500" : "bg-zinc-600")} />
-                            {p.users?.name || "Anonymous"} {p.is_host && "👑"}
+                            {getPlayerName(p) || "Anonymous"} {p.is_host && "👑"}
                         </div>
                     ))}
                 </div>
@@ -703,62 +799,87 @@ const triggerScoring = useCallback(() => {
                 <div className="text-center mb-12 relative z-10">
                     <h1 className="text-6xl lg:text-8xl font-black text-transparent bg-clip-text bg-gradient-to-b from-yellow-300 to-orange-600 drop-shadow-sm tracking-tighter italic">VICTORY</h1>
                     <p className="text-zinc-400 text-lg mt-2 font-light">The results are in.</p>
+                    
+                    {/* ✅ ELO NOTIFICATION POPUP ✅ */}
+                    <div className="mt-6 flex justify-center h-12">
+                        {!isRankedGame ? (
+                            <div className="px-4 py-2 rounded-full bg-zinc-800/50 border border-zinc-700 text-zinc-500 text-sm font-bold flex items-center gap-2">
+                                <Minus size={16} /> UNRANKED MATCH
+                            </div>
+                        ) : eloChange !== null ? (
+                            <motion.div
+                                initial={{ opacity: 0, y: 20 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                className={cn(
+                                    "px-6 py-2 rounded-full border-2 text-xl font-black flex items-center gap-3 shadow-2xl backdrop-blur-md",
+                                    eloChange > 0 ? "bg-emerald-500/10 border-emerald-500 text-emerald-400" :
+                                    eloChange < 0 ? "bg-red-500/10 border-red-500 text-red-500" :
+                                    "bg-zinc-800/50 border-zinc-700 text-zinc-400"
+                                )}
+                            >
+                                {eloChange > 0 ? <TrendingUp size={24} /> : eloChange < 0 ? <TrendingDown size={24} /> : <Minus size={24} />}
+                                <span>{eloChange > 0 ? "+" : ""}{eloChange} ELO</span>
+                            </motion.div>
+                        ) : null}
+                    </div>
+                    {/* --------------------------- */}
+
                 </div>
                 <div className="flex items-end justify-center gap-4 lg:gap-8 w-full max-w-4xl mb-12 px-4 h-[400px]">
                     {players.length > 1 && (() => {
-                        const sorted = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0));
+                        const sorted = [...players].sort((a,b) => getPlayerScore(b) - getPlayerScore(a));
                         const p2 = sorted[1];
                         if (!p2) return null;
                         return (
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "60%", opacity: 1 }} transition={{ delay: 0.5, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[200px]">
                                 <div className="mb-4 flex flex-col items-center gap-2">
                                     <div className="w-16 h-16 rounded-full border-2 border-zinc-500 bg-zinc-800 flex items-center justify-center text-xl font-bold text-zinc-300 shadow-xl">
-                                        {p2.users?.name?.[0] || "?"}
+                                        {getPlayerName(p2)[0] || "?"}
                                     </div>
-                                    <span className="text-zinc-400 font-bold truncate max-w-full">{p2.users?.name || "Player 2"}</span>
+                                    <span className="text-zinc-400 font-bold truncate max-w-full">{getPlayerName(p2)}</span>
                                 </div>
                                 <div className="w-full h-full bg-gradient-to-t from-zinc-800 to-zinc-600 rounded-t-lg border-t border-zinc-500 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(255,255,255,0.05)]">
                                     <span className="text-4xl font-black text-zinc-400/20 absolute top-2">2</span>
-                                    <span className="text-2xl font-bold text-white">{p2.player_scores?.total_score || 0}</span>
+                                    <span className="text-2xl font-bold text-white">{getPlayerScore(p2)}</span>
                                 </div>
                             </motion.div>
                         )
                     })()}
 
                     {(() => {
-                        const p1 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[0];
+                        const p1 = [...players].sort((a,b) => getPlayerScore(b) - getPlayerScore(a))[0];
                         if (!p1) return null;
                         return (
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "80%", opacity: 1 }} transition={{ delay: 0.8, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[220px] z-10">
                                 <div className="mb-4 flex flex-col items-center gap-2 relative">
                                     <div className="absolute -top-10 text-5xl animate-bounce">👑</div>
                                     <div className="w-24 h-24 rounded-full border-4 border-yellow-400 bg-zinc-800 flex items-center justify-center text-3xl font-bold text-white shadow-[0_0_30px_rgba(250,204,21,0.4)]">
-                                        {p1.users?.name?.[0] || "?"}
+                                        {getPlayerName(p1)[0] || "?"}
                                     </div>
-                                    <span className="text-yellow-400 font-bold text-xl truncate max-w-full">{p1.users?.name || "Champion"}</span>
+                                    <span className="text-yellow-400 font-bold text-xl truncate max-w-full">{getPlayerName(p1)}</span>
                                 </div>
                                 <div className="w-full h-full bg-gradient-to-t from-orange-600 via-yellow-500 to-yellow-300 rounded-t-xl border-t border-yellow-200 relative flex items-end justify-center pb-6 shadow-[0_0_50px_rgba(234,179,8,0.3)]">
                                     <span className="text-6xl font-black text-white/30 absolute top-4">1</span>
-                                    <span className="text-4xl font-black text-black">{p1.player_scores?.total_score || 0}</span>
+                                    <span className="text-4xl font-black text-black">{getPlayerScore(p1)}</span>
                                 </div>
                             </motion.div>
                         )
                     })()}
 
                     {players.length > 2 && (() => {
-                        const p3 = [...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0))[2];
+                        const p3 = [...players].sort((a,b) => getPlayerScore(b) - getPlayerScore(a))[2];
                         if (!p3) return null;
                         return (
                             <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: "45%", opacity: 1 }} transition={{ delay: 0.2, duration: 0.8, type: "spring" }} className="flex flex-col items-center justify-end w-1/3 max-w-[200px]">
                                 <div className="mb-4 flex flex-col items-center gap-2">
                                     <div className="w-16 h-16 rounded-full border-2 border-orange-800 bg-zinc-800 flex items-center justify-center text-xl font-bold text-orange-700 shadow-xl">
-                                        {p3.users?.name?.[0] || "?"}
+                                        {getPlayerName(p3)[0] || "?"}
                                     </div>
-                                    <span className="text-orange-800/80 font-bold truncate max-w-full">{p3.users?.name || "Player 3"}</span>
+                                    <span className="text-orange-800/80 font-bold truncate max-w-full">{getPlayerName(p3)}</span>
                                 </div>
                                 <div className="w-full h-full bg-gradient-to-t from-orange-900 to-orange-700 rounded-t-lg border-t border-orange-600 relative flex items-end justify-center pb-4 shadow-[0_0_30px_rgba(194,65,12,0.1)]">
                                     <span className="text-4xl font-black text-black/20 absolute top-2">3</span>
-                                    <span className="text-2xl font-bold text-orange-100">{p3.player_scores?.total_score || 0}</span>
+                                    <span className="text-2xl font-bold text-orange-100">{getPlayerScore(p3)}</span>
                                 </div>
                             </motion.div>
                         )
@@ -767,13 +888,13 @@ const triggerScoring = useCallback(() => {
                 {players.length > 3 && (
                     <div className="w-full max-w-md bg-white/5 rounded-xl border border-white/5 p-4 mb-8 max-h-40 overflow-y-auto">
                         <h3 className="text-xs uppercase text-zinc-500 font-bold mb-3 tracking-wider">Honorable Mentions</h3>
-                        {[...players].sort((a,b) => (b.player_scores?.total_score||0) - (a.player_scores?.total_score||0)).slice(3).map((p, i) => (
+                        {[...players].sort((a,b) => getPlayerScore(b) - getPlayerScore(a)).slice(3).map((p, i) => (
                                 <div key={p.user_id} className="flex justify-between items-center py-2 border-b border-white/5 last:border-0">
                                     <span className="text-zinc-400 flex items-center gap-3">
                                         <span className="text-xs font-mono opacity-50">#{i + 4}</span>
-                                        {p.users?.name || "Anonymous"}
+                                        {getPlayerName(p)}
                                     </span>
-                                    <span className="text-zinc-500 font-mono">{p.player_scores?.total_score || 0}</span>
+                                    <span className="text-zinc-500 font-mono">{getPlayerScore(p)}</span>
                                 </div>
                         ))}
                     </div>
